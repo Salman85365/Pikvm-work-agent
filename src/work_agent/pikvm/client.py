@@ -23,6 +23,9 @@ from work_agent.pikvm.models import MouseButton, Screenshot, ScreenSize
 _RETRYABLE_STATUS_CODES = frozenset({429, 502, 503, 504})
 _HID_MIN = -32768
 _HID_MAX = 32767
+_UNCERTAIN_HID_OUTCOME = (
+    " The HID outcome is uncertain; verify the screen state before deciding whether to retry."
+)
 
 
 class PiKVMClient:
@@ -237,9 +240,13 @@ class PiKVMClient:
         try:
             payload = response.json()
         except ValueError as exc:
-            raise PiKVMProtocolError("PiKVM HID response was not valid JSON.") from exc
+            raise PiKVMProtocolError(
+                "PiKVM HID response was not valid JSON." + _UNCERTAIN_HID_OUTCOME
+            ) from exc
         if not isinstance(payload, dict) or payload.get("ok") is not True:
-            raise PiKVMProtocolError("PiKVM HID response did not report success.")
+            raise PiKVMProtocolError(
+                "PiKVM HID response did not report success." + _UNCERTAIN_HID_OUTCOME
+            )
 
     def _request(
         self,
@@ -259,14 +266,18 @@ class PiKVMClient:
                 if attempt + 1 < attempts:
                     self._wait_before_retry(attempt)
                     continue
-                raise PiKVMTimeoutError(f"PiKVM timed out during {method} /{path}.") from exc
+                message = f"PiKVM timed out during {method} /{path}."
+                if not retryable:
+                    message += _UNCERTAIN_HID_OUTCOME
+                raise PiKVMTimeoutError(message) from exc
             except httpx.RequestError as exc:
                 if attempt + 1 < attempts:
                     self._wait_before_retry(attempt)
                     continue
-                raise PiKVMConnectionError(
-                    f"Could not reach PiKVM during {method} /{path}."
-                ) from exc
+                message = f"Could not reach PiKVM during {method} /{path}."
+                if not retryable:
+                    message += _UNCERTAIN_HID_OUTCOME
+                raise PiKVMConnectionError(message) from exc
 
             if response.status_code in {401, 403}:
                 raise PiKVMAuthenticationError(
@@ -277,7 +288,12 @@ class PiKVMClient:
                 self._wait_before_retry(attempt)
                 continue
             if response.is_error:
-                raise PiKVMResponseError(response.status_code, method, f"/{path}")
+                raise PiKVMResponseError(
+                    response.status_code,
+                    method,
+                    f"/{path}",
+                    outcome_uncertain=not retryable,
+                )
             return response
 
         raise AssertionError("PiKVM request retry loop exited unexpectedly.")
@@ -290,8 +306,10 @@ class PiKVMClient:
 
 def _validate_key(key: str) -> str:
     normalized = key.strip()
-    if not normalized or "," in normalized:
-        raise ValueError("PiKVM key names must be non-empty and cannot contain commas.")
+    if not normalized or "," in normalized or any(character.isspace() for character in normalized):
+        raise ValueError(
+            "PiKVM key names must be non-empty and cannot contain commas or whitespace."
+        )
     return normalized
 
 

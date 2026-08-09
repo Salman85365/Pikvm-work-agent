@@ -24,11 +24,25 @@ class PiKVMAuthenticationError(PiKVMError):
 class PiKVMResponseError(PiKVMError):
     """PiKVM returned an unsuccessful HTTP response."""
 
-    def __init__(self, status_code: int, method: str, path: str) -> None:
+    def __init__(
+        self,
+        status_code: int,
+        method: str,
+        path: str,
+        *,
+        outcome_uncertain: bool = False,
+    ) -> None:
         self.status_code = status_code
         self.method = method
         self.path = path
-        super().__init__(f"PiKVM returned HTTP {status_code} for {method} {path}.")
+        self.outcome_uncertain = outcome_uncertain
+        message = f"PiKVM returned HTTP {status_code} for {method} {path}."
+        if outcome_uncertain:
+            message += (
+                " The HID outcome is uncertain; verify the screen state before deciding whether "
+                "to retry."
+            )
+        super().__init__(message)
 
 
 class PiKVMProtocolError(PiKVMError):

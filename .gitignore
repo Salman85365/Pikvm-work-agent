@@ -12,5 +12,12 @@ dist/
 htmlcov/
 .coverage
 artifacts/
+debug-screenshots/
+.local-debug/
+private-screenshots/
+evals/private/
+*analysis-overlay*.jpg
+*analysis-overlay*.jpeg
+*analysis-overlay*.png
 pikvm-screen.jpg
 pikvm-screenshot-*.jpg

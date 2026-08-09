@@ -10,6 +10,7 @@ from work_agent.pikvm import (
     PiKVMAuthenticationError,
     PiKVMClient,
     PiKVMConfigurationError,
+    PiKVMConnectionError,
     PiKVMProtocolError,
     PiKVMResponseError,
     PiKVMSettings,
@@ -129,11 +130,13 @@ def test_press_key_is_not_retried_after_timeout() -> None:
             _settings(max_retries=5),
             transport=httpx.MockTransport(handler),
         ) as client,
-        pytest.raises(PiKVMTimeoutError),
+        pytest.raises(PiKVMTimeoutError) as error,
     ):
         client.press_key("Enter")
 
     assert attempts == 1
+    assert "HID outcome is uncertain" in str(error.value)
+    assert "verify the screen state" in str(error.value)
 
 
 def test_hid_methods_use_documented_endpoints_and_pixel_mapping() -> None:
@@ -197,3 +200,38 @@ def test_non_retryable_http_error_is_wrapped() -> None:
         client.press_key("Enter")
 
     assert error.value.status_code == 500
+    assert error.value.outcome_uncertain is True
+    assert "HID outcome is uncertain" in str(error.value)
+
+
+def test_invalid_hid_response_reports_uncertain_outcome() -> None:
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, content=b"not json"))
+
+    with (
+        PiKVMClient(_settings(), transport=transport) as client,
+        pytest.raises(PiKVMProtocolError, match="HID outcome is uncertain"),
+    ):
+        client.press_key("Enter")
+
+
+def test_hid_connection_failure_reports_uncertain_outcome() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise httpx.ReadError("connection lost after request", request=request)
+
+    with (
+        PiKVMClient(_settings(), transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(PiKVMConnectionError, match="HID outcome is uncertain"),
+    ):
+        client.press_key("Enter")
+
+
+@pytest.mark.parametrize("key", ["Enter Key", "Enter,Key", "   "])
+def test_invalid_key_is_rejected_before_request(key: str) -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        raise AssertionError("No HTTP request should be sent")
+
+    with (
+        PiKVMClient(_settings(), transport=httpx.MockTransport(handler)) as client,
+        pytest.raises(ValueError, match="commas or whitespace"),
+    ):
+        client.press_key(key)

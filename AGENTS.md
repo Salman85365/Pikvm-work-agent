@@ -215,7 +215,7 @@ For real hardware milestones:
 
 ## Current project status
 
-Milestone 1 is complete and has been validated against the real PiKVM.
+Milestones 1 through 3 are complete and have been validated against the real PiKVM/OpenAI path.
 
 Implemented:
 
@@ -239,34 +239,39 @@ Important real-world result:
 
 The user successfully executed the screenshot command from the Mac, entered the PiKVM 2FA code interactively, and received a correct screenshot of the remote computer.
 
+The user also validated the explicit Milestone 2 keyboard, hotkey, text, mouse movement, click, and scroll commands against the real PiKVM.
+
 Therefore:
 
-PIKVM TRANSPORT + AUTHENTICATION + SCREENSHOT CAPTURE HAVE BEEN VERIFIED ON REAL HARDWARE.
+PIKVM TRANSPORT + AUTHENTICATION + SCREENSHOT CAPTURE + EXPLICIT HID OPERATIONS HAVE BEEN VERIFIED ON REAL HARDWARE.
 
-Do not redo Milestone 1 unless a specific defect requires it.
+The user also validated Milestone 3 against a saved real Slack screenshot and a live PiKVM
+screenshot. Application recognition, normalized Slack profile-control localization, overlay output,
+and the interactive live 2FA analysis flow all succeeded.
+
+Do not redo Milestones 1 through 3 unless a specific defect requires it.
 
 ## Current next milestone
 
-Proceed with Milestone 2 incrementally.
+Milestone 4's bounded generic controller is implemented and awaiting real-hardware validation.
 
-The next objective is to safely verify HID operations against the real PiKVM.
+The controller implements:
 
-Do not begin general autonomous GUI control yet.
+OBSERVE → ANALYZE/VERIFY → PLAN ONE ACTION → POLICY → STALE-SCREEN GUARD → ONE HID ACTION → OBSERVE.
 
-Implement/test explicit commands such as:
+Milestone 4 may:
 
-- key;
-- hotkey;
-- type;
-- mouse move;
-- click;
-- scroll.
+- perform bounded, harmless GUI navigation;
+- request local human approval;
+- execute exactly one locally validated action per cycle;
+- verify every executed action from a fresh settled screenshot;
+- stop on uncertainty, unsafe state, stale plans, loops, or configured limits.
 
-Each command should perform exactly the explicitly requested operation.
+Do not mark Milestone 4 complete until the user validates dry-run, approval-every step mode, safe
+navigation to Slack, and opening the Slack profile menu. Do not start Milestone 5, change Slack
+status, or send/read Slack messages during Milestone 4 validation.
 
-Avoid automatic retries for HID actions where retrying could duplicate input.
-
-After the transport is proven, proceed to visual screen understanding as a separate milestone.
+Read-only OpenAI analysis may use bounded transient retries. The existing rule against retrying HID actions remains unchanged.
 
 ## Long-term objective
 

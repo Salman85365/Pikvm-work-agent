@@ -335,8 +335,15 @@ verification outcomes; it does not print screenshots or visible Slack content.
 
 Sanitized JSONL operation records are stored at
 `~/Library/Logs/pikvm-work-agent/slack-availability.jsonl`. They contain the KVM name, requested and
-observed availability, changed/no-op result, outcome, and sanitized error. Screenshots, visible
-Slack content, credentials, TOTP values, and API keys are never written there.
+observed availability, changed/no-op result, outcome, a machine-readable `stop_code`, and a sanitized
+error. Screenshots, visible Slack content, credentials, TOTP values, and API keys are never written
+there.
+
+`stop_code` names exactly why the controller stopped — for example `completion_unverified`,
+`policy_denied`, `transport_failed`, `screen_unsafe`, or `stuck_no_screen_change`. Classify failures
+from that field rather than from the error text, which is prose and may be reworded. Records written
+before this field existed have `stop_code: null` and appear as "Recorded before stop codes existed"
+in the dashboard rather than being guessed at.
 
 ## Mac-local Slack availability schedule
 

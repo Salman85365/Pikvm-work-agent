@@ -18,6 +18,8 @@ class AvailabilityResult:
     success: bool
     error: str | None = None
     log_error: str | None = None
+    # Machine-readable controller stop cause; classify from this, never from `error`.
+    stop_code: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

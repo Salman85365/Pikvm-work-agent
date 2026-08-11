@@ -34,6 +34,7 @@ class JsonlAvailabilityLogger:
             ),
             "changed": result.changed,
             "outcome": "success" if result.success else "failure",
+            "stop_code": result.stop_code,
             "error": result.error,
         }
         try:

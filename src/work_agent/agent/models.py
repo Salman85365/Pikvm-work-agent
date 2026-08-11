@@ -84,6 +84,34 @@ class AgentFinalStatus(StrEnum):
     INTERRUPTED = "interrupted"
 
 
+class StopCode(StrEnum):
+    """Why a controller session ended, as data rather than prose.
+
+    Skills and telemetry must classify outcomes from this, never by matching the
+    human-readable summary, so a wording change cannot silently reclassify failures.
+    """
+
+    COMPLETED = "completed"
+    DRY_RUN = "dry_run"
+    RUNTIME_LIMIT = "runtime_limit"
+    STEP_LIMIT = "step_limit"
+    SCREEN_UNSAFE = "screen_unsafe"
+    SCREEN_LOW_CONFIDENCE = "screen_low_confidence"
+    PLANNER_LOW_CONFIDENCE = "planner_low_confidence"
+    VERIFICATION_FAILED = "verification_failed"
+    VERIFICATION_MISSING = "verification_missing"
+    COMPLETION_UNVERIFIED = "completion_unverified"
+    POLICY_DENIED = "policy_denied"
+    APPROVAL_DENIED = "approval_denied"
+    STEP_CANCELLED = "step_cancelled"
+    USER_ASSISTANCE_REQUESTED = "user_assistance_requested"
+    TRANSPORT_FAILED = "transport_failed"
+    STUCK_REPEATED_ACTION = "stuck_repeated_action"
+    STUCK_NO_SCREEN_CHANGE = "stuck_no_screen_change"
+    INTERRUPTED = "interrupted"
+    INTERNAL_ERROR = "internal_error"
+
+
 class WaitAction(_StrictModel):
     type: Literal["wait"]
     seconds: float = Field(ge=0.1, le=10.0)
@@ -248,6 +276,7 @@ class SessionTelemetry(_StrictModel):
 
 class AgentSessionResult(_StrictModel):
     status: AgentFinalStatus
+    stop_code: StopCode
     summary: str = Field(min_length=1)
     telemetry: SessionTelemetry
     history: list[AgentStep]

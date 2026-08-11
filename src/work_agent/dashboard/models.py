@@ -62,6 +62,7 @@ class RunRecord(_Model):
     observed: str
     changed: bool | None
     outcome: str
+    stop_code: str | None
     error: str | None
 
 

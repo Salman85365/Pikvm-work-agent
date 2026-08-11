@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from work_agent.agent import controller
 from work_agent.agent.approval import NonInteractiveApprovalProvider
 from work_agent.agent.models import (
     ActionProposal,
@@ -13,6 +14,7 @@ from work_agent.agent.models import (
     ClickElementAction,
     RequestUserAction,
     RiskCategory,
+    StopCode,
 )
 from work_agent.slack.agent_operator import AgentAvailabilityOperator
 from work_agent.slack.logging import JsonlAvailabilityLogger
@@ -132,7 +134,7 @@ def test_agent_operator_reports_verified_transitions_and_no_ops(
         for toggle in observations:
             observe(_analysis(toggle))
         assert validate(_analysis(observations[-1])) is None
-        return SimpleNamespace(status=AgentFinalStatus.SUCCESS)
+        return SimpleNamespace(status=AgentFinalStatus.SUCCESS, stop_code=StopCode.COMPLETED)
 
     result = AgentAvailabilityOperator(executor=executor).execute("work-kvm", desired)
 
@@ -160,7 +162,7 @@ def test_get_operation_never_requests_a_change() -> None:
     def executor(args: object, **kwargs: object) -> object:
         objectives.append(args.objective)
         kwargs["observation_sink"](_analysis("Set yourself as away"))
-        return SimpleNamespace(status=AgentFinalStatus.SUCCESS)
+        return SimpleNamespace(status=AgentFinalStatus.SUCCESS, stop_code=StopCode.COMPLETED)
 
     result = AgentAvailabilityOperator(executor=executor).execute("work-kvm", None)
 
@@ -229,12 +231,13 @@ def test_failed_mutation_gets_one_read_only_final_state_verification() -> None:
             kwargs["observation_sink"](_analysis("Set yourself as active"))
             return SimpleNamespace(
                 status=AgentFinalStatus.FAILED,
+                stop_code=StopCode.VERIFICATION_FAILED,
                 summary="Previous action was not verified; it will not be repeated.",
                 telemetry=SimpleNamespace(hid_actions=1),
                 history=[SimpleNamespace(proposal=_availability_click_proposal())],
             )
         kwargs["observation_sink"](_analysis("Set yourself as away"))
-        return SimpleNamespace(status=AgentFinalStatus.SUCCESS)
+        return SimpleNamespace(status=AgentFinalStatus.SUCCESS, stop_code=StopCode.COMPLETED)
 
     result = AgentAvailabilityOperator(
         executor=executor,
@@ -262,11 +265,12 @@ def test_read_only_verification_never_retries_a_failed_availability_change() -> 
         if len(calls) == 1:
             return SimpleNamespace(
                 status=AgentFinalStatus.FAILED,
+                stop_code=StopCode.VERIFICATION_FAILED,
                 summary="Previous action was not verified; it will not be repeated.",
                 telemetry=SimpleNamespace(hid_actions=1),
                 history=[SimpleNamespace(proposal=_availability_click_proposal())],
             )
-        return SimpleNamespace(status=AgentFinalStatus.SUCCESS)
+        return SimpleNamespace(status=AgentFinalStatus.SUCCESS, stop_code=StopCode.COMPLETED)
 
     result = AgentAvailabilityOperator(executor=executor).execute(
         "work-kvm",
@@ -299,6 +303,7 @@ def test_profile_navigation_failure_does_not_trigger_a_second_controller_session
         calls.append(args)
         return SimpleNamespace(
             status=AgentFinalStatus.FAILED,
+            stop_code=StopCode.VERIFICATION_FAILED,
             summary="Previous action was not verified; it will not be repeated.",
             telemetry=SimpleNamespace(hid_actions=1),
             history=[SimpleNamespace(proposal=profile_proposal)],
@@ -344,6 +349,7 @@ def test_paused_operator_reports_safe_request_user_classification() -> None:
     )
     session = SimpleNamespace(
         status=AgentFinalStatus.PAUSED,
+        stop_code=StopCode.USER_ASSISTANCE_REQUESTED,
         summary="private visible screen text",
         history=[SimpleNamespace(proposal=proposal)],
         telemetry=SimpleNamespace(planner_calls=1),
@@ -364,6 +370,7 @@ def test_paused_operator_reports_safe_request_user_classification() -> None:
 def test_policy_approval_pause_is_classified_without_private_summary() -> None:
     session = SimpleNamespace(
         status=AgentFinalStatus.PAUSED,
+        stop_code=StopCode.APPROVAL_DENIED,
         summary="User rejected or did not provide approval.",
         history=[],
         telemetry=SimpleNamespace(planner_calls=1),
@@ -422,6 +429,34 @@ def test_all_kvms_run_sequentially_and_one_failure_does_not_stop_later_kvms() ->
     assert result.success is False
 
 
+def test_every_stop_code_maps_to_a_distinct_sanitized_reason() -> None:
+    """No controller stop cause may be flattened into a generic string.
+
+    Before stop codes existed, agent_operator matched on the prose summary and mapped only 3 of
+    the controller's 8 failure summaries, so 13 of 26 real failures were logged as "stopped with
+    status failed" with the cause discarded.
+    """
+    from work_agent.slack.agent_operator import _STOP_REASONS
+
+    assert set(_STOP_REASONS) == set(StopCode), "every StopCode needs an explicit reason"
+
+    failure_codes = set(StopCode) - {StopCode.COMPLETED, StopCode.DRY_RUN}
+    reasons = [_STOP_REASONS[code] for code in failure_codes]
+    assert len(set(reasons)) == len(reasons), "failure reasons must not collide"
+    assert not any("status failed" in reason for reason in reasons)
+
+    for reason in _STOP_REASONS.values():
+        assert reason == reason.strip() and reason.endswith(".")
+
+
+def test_controller_reaches_every_stop_code_it_declares() -> None:
+    """StopCode members must be reachable, or the vocabulary is lying about what can happen."""
+    source = Path(controller.__file__).read_text(encoding="utf-8")
+    unreachable = [code.name for code in StopCode if f"StopCode.{code.name}" not in source]
+
+    assert unreachable == [], f"declared but never emitted: {unreachable}"
+
+
 def test_jsonl_log_contains_only_sanitized_operation_metadata(tmp_path: Path) -> None:
     path = tmp_path / "logs" / "availability.jsonl"
     path.parent.mkdir()
@@ -446,6 +481,7 @@ def test_jsonl_log_contains_only_sanitized_operation_metadata(tmp_path: Path) ->
         "observed_availability",
         "changed",
         "outcome",
+        "stop_code",
         "error",
     }
     assert "screenshot" not in entry

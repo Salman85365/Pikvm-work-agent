@@ -224,17 +224,16 @@ def test_history_groups_stop_reasons_into_reliability_categories(client: TestCli
     grouped = {item["category"]: item["count"] for item in summary["failure_categories"]}
 
     assert grouped == {
-        "verification": 2,
-        "approval": 1,
-        "low_confidence": 1,
-        "stuck": 1,
-        "controller_failed": 1,
-        "controller_paused": 1,
+        "verification_failed": 1,
+        "completion_unverified": 1,
+        "approval_denied": 1,
+        "screen_low_confidence": 1,
+        "stuck_repeated_action": 1,
+        "legacy_unclassified": 2,
         "other": 1,
     }
     # Most frequent first, so the chart never has to re-sort.
-    assert summary["failure_categories"][0]["category"] == "verification"
-    assert summary["failure_categories"][0]["label"] == "Could not verify the result"
+    assert summary["failure_categories"][0]["category"] == "legacy_unclassified"
 
 
 def test_history_categorizes_the_real_world_stop_reasons(client: TestClient) -> None:
@@ -266,7 +265,7 @@ def test_history_categorizes_the_real_world_stop_reasons(client: TestClient) -> 
     summary = client.get("/api/history", params={"days": 0}).json()["summary"]
     grouped = {item["category"]: item["count"] for item in summary["failure_categories"]}
 
-    assert grouped == {"controller_failed": 3, "verification": 1}
+    assert grouped == {"legacy_unclassified": 3, "verification_failed": 1}
     assert "other" not in grouped
 
 

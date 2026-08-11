@@ -33,6 +33,7 @@ from work_agent.agent.models import (
     PolicyDecisionKind,
     RequestUserAction,
     SessionTelemetry,
+    StopCode,
     action_fingerprint,
     action_summary,
     is_hid_action,
@@ -199,6 +200,7 @@ class AgentController:
                 if self._expired(started_clock):
                     return self._finish(
                         status=AgentFinalStatus.PAUSED,
+                        stop_code=StopCode.RUNTIME_LIMIT,
                         summary="Agent runtime limit reached.",
                         state=ControllerState.PAUSED,
                         objective=normalized_objective,
@@ -230,6 +232,7 @@ class AgentController:
                             started_clock,
                             counters,
                             history,
+                            stop_code=StopCode.VERIFICATION_MISSING,
                         )
                     if self._verification_override is not None:
                         overridden = self._verification_override(analysis, verification)
@@ -256,6 +259,7 @@ class AgentController:
                             started_clock,
                             counters,
                             history,
+                            stop_code=StopCode.VERIFICATION_FAILED,
                         )
                     planner_previous_execution = previous_execution
                     planner_previous_verification = verification
@@ -265,6 +269,7 @@ class AgentController:
                 if len(history) >= self._options.max_steps:
                     return self._finish(
                         status=AgentFinalStatus.PAUSED,
+                        stop_code=StopCode.STEP_LIMIT,
                         summary="Maximum step count reached after verifying the last action.",
                         state=ControllerState.PAUSED,
                         objective=normalized_objective,
@@ -275,10 +280,12 @@ class AgentController:
                         history=history,
                     )
 
-                unsafe_reason = self._unsafe_reason(analysis)
-                if unsafe_reason is not None:
+                unsafe = self._unsafe_reason(analysis)
+                if unsafe is not None:
+                    unsafe_reason, unsafe_code = unsafe
                     return self._finish(
                         status=AgentFinalStatus.PAUSED,
+                        stop_code=unsafe_code,
                         summary=unsafe_reason,
                         state=ControllerState.PAUSED,
                         objective=normalized_objective,
@@ -316,6 +323,7 @@ class AgentController:
                 if self._expired(started_clock):
                     return self._finish(
                         status=AgentFinalStatus.PAUSED,
+                        stop_code=StopCode.RUNTIME_LIMIT,
                         summary="Agent runtime limit reached before action execution.",
                         state=ControllerState.PAUSED,
                         objective=normalized_objective,
@@ -328,6 +336,7 @@ class AgentController:
                 if proposal.confidence < self._settings.min_action_confidence:
                     return self._finish(
                         status=AgentFinalStatus.PAUSED,
+                        stop_code=StopCode.PLANNER_LOW_CONFIDENCE,
                         summary="Planner confidence is below the configured action threshold.",
                         state=ControllerState.PAUSED,
                         objective=normalized_objective,
@@ -377,9 +386,11 @@ class AgentController:
                                 started_clock,
                                 counters,
                                 history,
+                                stop_code=StopCode.COMPLETION_UNVERIFIED,
                             )
                     return self._finish(
                         status=AgentFinalStatus.SUCCESS,
+                        stop_code=StopCode.COMPLETED,
                         summary=proposal.action.summary,
                         state=ControllerState.FINISHED,
                         objective=normalized_objective,
@@ -392,6 +403,7 @@ class AgentController:
                 if isinstance(proposal.action, RequestUserAction):
                     return self._finish(
                         status=AgentFinalStatus.PAUSED,
+                        stop_code=StopCode.USER_ASSISTANCE_REQUESTED,
                         summary=proposal.action.message,
                         state=ControllerState.PAUSED,
                         objective=normalized_objective,
@@ -410,6 +422,7 @@ class AgentController:
                         started_clock,
                         counters,
                         history,
+                        stop_code=StopCode.POLICY_DENIED,
                     )
                 if self._appears_stuck(history):
                     return self._failure(
@@ -420,10 +433,12 @@ class AgentController:
                         started_clock,
                         counters,
                         history,
+                        stop_code=StopCode.STUCK_REPEATED_ACTION,
                     )
                 if self._options.dry_run:
                     return self._finish(
                         status=AgentFinalStatus.DRY_RUN,
+                        stop_code=StopCode.DRY_RUN,
                         summary=f"Dry run: would {action_summary(proposal.action)}.",
                         state=ControllerState.FINISHED,
                         objective=normalized_objective,
@@ -444,6 +459,7 @@ class AgentController:
                     ):
                         return self._finish(
                             status=AgentFinalStatus.PAUSED,
+                            stop_code=StopCode.APPROVAL_DENIED,
                             summary="User rejected or did not provide approval.",
                             state=ControllerState.PAUSED,
                             objective=normalized_objective,
@@ -458,6 +474,7 @@ class AgentController:
                     if not self._approval.confirm_step(proposal=proposal, policy=decision):
                         return self._finish(
                             status=AgentFinalStatus.PAUSED,
+                            stop_code=StopCode.STEP_CANCELLED,
                             summary="Step execution was cancelled by the user.",
                             state=ControllerState.PAUSED,
                             objective=normalized_objective,
@@ -503,6 +520,7 @@ class AgentController:
                         started_clock,
                         counters,
                         history,
+                        stop_code=StopCode.TRANSPORT_FAILED,
                     )
 
                 self._transition(ControllerState.WAITING_FOR_SCREEN)
@@ -531,6 +549,7 @@ class AgentController:
                         started_clock,
                         counters,
                         history,
+                        stop_code=StopCode.STUCK_NO_SCREEN_CHANGE,
                     )
                 current = settled.screenshot
                 previous_execution = execution
@@ -538,6 +557,7 @@ class AgentController:
         except KeyboardInterrupt:
             return self._finish(
                 status=AgentFinalStatus.INTERRUPTED,
+                stop_code=StopCode.INTERRUPTED,
                 summary="Agent interrupted; no further HID actions were issued.",
                 state=ControllerState.PAUSED,
                 objective=normalized_objective,
@@ -556,6 +576,7 @@ class AgentController:
                 started_clock,
                 counters,
                 history,
+                stop_code=StopCode.INTERNAL_ERROR,
             )
 
     def _observe(
@@ -595,11 +616,17 @@ class AgentController:
         counters.model_latency_seconds += observation.analysis.latency_seconds
         return observation
 
-    def _unsafe_reason(self, analysis: ScreenAnalysis) -> str | None:
+    def _unsafe_reason(self, analysis: ScreenAnalysis) -> tuple[str, StopCode] | None:
         if analysis.confidence < self._settings.min_action_confidence:
-            return "Screen confidence is below the configured action threshold."
+            return (
+                "Screen confidence is below the configured action threshold.",
+                StopCode.SCREEN_LOW_CONFIDENCE,
+            )
         if not analysis.safe_to_continue:
-            return analysis.stop_reason or "The current screen is unsafe to continue from."
+            return (
+                analysis.stop_reason or "The current screen is unsafe to continue from.",
+                StopCode.SCREEN_UNSAFE,
+            )
         return None
 
     @staticmethod
@@ -677,9 +704,12 @@ class AgentController:
         started_clock: float,
         counters: _Counters,
         history: list[AgentStep],
+        *,
+        stop_code: StopCode,
     ) -> AgentSessionResult:
         return self._finish(
             status=AgentFinalStatus.FAILED,
+            stop_code=stop_code,
             summary=summary or "Agent stopped after a sanitized controller failure.",
             state=ControllerState.FAILED,
             objective=objective,
@@ -694,6 +724,7 @@ class AgentController:
         self,
         *,
         status: AgentFinalStatus,
+        stop_code: StopCode,
         summary: str,
         state: ControllerState,
         objective: str,
@@ -728,6 +759,7 @@ class AgentController:
         )
         return AgentSessionResult(
             status=status,
+            stop_code=stop_code,
             summary=summary,
             telemetry=telemetry,
             history=list(history),

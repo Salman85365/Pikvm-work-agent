@@ -11,7 +11,7 @@ from work_agent.agent.models import (
     AgentSessionResult,
     ApprovalMode,
     ClickElementAction,
-    RequestUserAction,
+    StopCode,
 )
 from work_agent.pikvm import PiKVMError
 from work_agent.slack.analyzer import SlackAvailabilityScreenAnalyzer
@@ -73,8 +73,10 @@ class AgentAvailabilityOperator:
         elif success and tracker.first is not None:
             changed = tracker.first is not desired
         error = None
+        stop_code = None
         if not success:
             error = _controller_failure_reason(session)
+            stop_code = session.stop_code.value
         return AvailabilityResult(
             kvm=kvm,
             desired=desired,
@@ -82,6 +84,7 @@ class AgentAvailabilityOperator:
             changed=changed,
             success=success,
             error=error,
+            stop_code=stop_code,
         )
 
     def _run_controller(
@@ -128,7 +131,7 @@ class AgentAvailabilityOperator:
         return (
             desired is not None
             and session.status is AgentFinalStatus.FAILED
-            and session.summary == "Previous action was not verified; it will not be repeated."
+            and session.stop_code is StopCode.VERIFICATION_FAILED
             and session.telemetry.hid_actions > 0
             and AgentAvailabilityOperator._last_action_is_availability_toggle(session)
         )
@@ -152,6 +155,7 @@ class AgentAvailabilityOperator:
         observed: Availability | None,
     ) -> AvailabilityResult:
         success = session.status is AgentFinalStatus.SUCCESS and observed is desired
+        stop_code: str | None = None
         if success:
             error = None
             changed = None if first_observed is None else first_observed is not desired
@@ -159,15 +163,18 @@ class AgentAvailabilityOperator:
             error = "Read-only final-state verification did not complete: " + (
                 _controller_failure_reason(session)
             )
+            stop_code = session.stop_code.value
             changed = None
         elif observed is None:
             error = "Read-only final-state verification found no manual availability evidence."
+            stop_code = StopCode.COMPLETION_UNVERIFIED.value
             changed = None
         else:
             error = (
                 f"Read-only final-state verification found {observed.value}, "
                 f"not requested {desired.value}."
             )
+            stop_code = StopCode.COMPLETION_UNVERIFIED.value
             changed = False
         return AvailabilityResult(
             kvm=kvm,
@@ -176,56 +183,60 @@ class AgentAvailabilityOperator:
             changed=changed,
             success=success,
             error=error,
+            stop_code=stop_code,
         )
 
 
+# Exhaustive by StopCode, so no cause can be flattened into a generic string. Every entry
+# must stay sanitized: no screen content, credentials, or provider detail.
+_STOP_REASONS: dict[StopCode, str] = {
+    StopCode.RUNTIME_LIMIT: "The controller reached its runtime limit.",
+    StopCode.STEP_LIMIT: "The controller reached its maximum verified step count.",
+    StopCode.SCREEN_UNSAFE: (
+        "The screen analyzer marked the visible state unsafe for unattended navigation."
+    ),
+    StopCode.SCREEN_LOW_CONFIDENCE: (
+        "The screen observation confidence was below the safety threshold."
+    ),
+    StopCode.PLANNER_LOW_CONFIDENCE: "The next-action confidence was below the safety threshold.",
+    StopCode.VERIFICATION_FAILED: (
+        "The last action's expected result could not be visually verified; the action was not "
+        "repeated."
+    ),
+    StopCode.VERIFICATION_MISSING: (
+        "The post-action observation returned no verification, so the result was not assumed."
+    ),
+    StopCode.COMPLETION_UNVERIFIED: (
+        "The planner reported completion, but the final screen did not visibly prove the Slack "
+        "availability state."
+    ),
+    StopCode.POLICY_DENIED: "Local policy denied the proposed action on the visible screen.",
+    StopCode.APPROVAL_DENIED: (
+        "Local policy required interactive approval, which unattended Slack workflows deny."
+    ),
+    StopCode.STEP_CANCELLED: "The controller step was cancelled before execution.",
+    StopCode.USER_ASSISTANCE_REQUESTED: (
+        "The planner requested user assistance instead of guessing from the visible screen."
+    ),
+    StopCode.TRANSPORT_FAILED: (
+        "PiKVM could not accept the HID action; it was not retried or replayed."
+    ),
+    StopCode.STUCK_REPEATED_ACTION: (
+        "The controller stopped before repeating the same action on an unchanged screen."
+    ),
+    StopCode.STUCK_NO_SCREEN_CHANGE: (
+        "The controller stopped because a sent action produced no visible screen change."
+    ),
+    StopCode.INTERRUPTED: "The Slack availability controller was interrupted before completion.",
+    StopCode.INTERNAL_ERROR: "A sanitized local error stopped the controller.",
+    StopCode.COMPLETED: "The controller completed.",
+    StopCode.DRY_RUN: "The controller ran in dry-run mode and issued no action.",
+}
+
+
 def _controller_failure_reason(session: AgentSessionResult) -> str:
-    if session.status is AgentFinalStatus.PAUSED:
-        if session.history and isinstance(session.history[-1].proposal.action, RequestUserAction):
-            return (
-                "The planner requested user assistance instead of guessing from the visible screen."
-            )
-        known_reasons = {
-            "Agent runtime limit reached.": "The controller reached its runtime limit.",
-            "Agent runtime limit reached before action execution.": (
-                "The controller reached its runtime limit before executing the next action."
-            ),
-            "Maximum step count reached after verifying the last action.": (
-                "The controller reached its maximum verified step count."
-            ),
-            "Screen confidence is below the configured action threshold.": (
-                "The screen observation confidence was below the safety threshold."
-            ),
-            "Planner confidence is below the configured action threshold.": (
-                "The next-action confidence was below the safety threshold."
-            ),
-            "User rejected or did not provide approval.": (
-                "Local policy required interactive approval, which unattended Slack workflows deny."
-            ),
-            "Step execution was cancelled by the user.": (
-                "The controller step was cancelled before execution."
-            ),
-        }
-        if session.summary in known_reasons:
-            return known_reasons[session.summary]
-        if session.telemetry.planner_calls == 0:
-            return "The screen analyzer marked the visible state unsafe for unattended navigation."
-        return "The bounded controller paused before Slack availability could be verified."
-    if session.status is AgentFinalStatus.INTERRUPTED:
-        return "The Slack availability controller was interrupted before completion."
-    if session.status is AgentFinalStatus.FAILED:
-        known_failures = {
-            "Previous action was not verified; it will not be repeated.": (
-                "The last action's expected result could not be visually verified; the action was "
-                "not repeated."
-            ),
-            "Agent appears stuck; the repeated action was not executed.": (
-                "The controller stopped before repeating the same action on an unchanged screen."
-            ),
-            "Agent appears stuck because the screen did not change.": (
-                "The controller stopped because a sent action produced no visible screen change."
-            ),
-        }
-        if session.summary in known_failures:
-            return known_failures[session.summary]
+    reason = _STOP_REASONS.get(session.stop_code)
+    if reason is not None:
+        return reason
+    # Unreachable while _STOP_REASONS covers StopCode; kept so a new code degrades safely.
     return f"The verified controller stopped with status {session.status.value}."

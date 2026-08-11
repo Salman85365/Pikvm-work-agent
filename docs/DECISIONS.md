@@ -163,6 +163,28 @@ a separate health check probes what the *already installed* agents would run. `s
 result and exits non-zero when scheduled runs cannot work, so a loaded job is never mistaken for a
 working one.
 
+## Structured controller stop codes
+
+Status: accepted and implemented.
+
+`AgentSessionResult` carries a `StopCode` alongside its prose summary, and every one of the
+controller's stop paths sets one. Skills, logs, and telemetry must classify outcomes from that code
+and never by matching the summary text.
+
+This replaced string matching that had silently lost information. `slack.agent_operator` mapped 3 of
+the controller's 8 possible failure summaries and flattened the rest into "The verified controller
+stopped with status failed", so 13 of 26 real failures were recorded with the cause discarded:
+completion-validation failures, policy denials, HID transport failures, missing verification, and
+caught exceptions were indistinguishable. Reliability work on Milestone 5 was blocked because the
+most common failure was unattributable.
+
+The reason table is exhaustive over `StopCode` and tested for exhaustiveness, distinctness, and
+reachability, so adding a stop path without a reason fails the suite rather than degrading into a
+generic message. Reasons remain sanitized: no screen content, credentials, or provider detail.
+
+`stop_code` is written to the sanitized JSONL log. Records predating the field fall back to text
+matching, which is retained only for continuity of the existing history and must not be extended.
+
 ## Local operations dashboard
 
 Status: accepted and implemented.

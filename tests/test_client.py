@@ -19,6 +19,16 @@ from work_agent.pikvm import (
 )
 
 
+class _TotpProvider:
+    def __init__(self, code: str) -> None:
+        self.code = code
+        self.calls = 0
+
+    def current_code(self) -> str:
+        self.calls += 1
+        return self.code
+
+
 def _jpeg(width: int = 16, height: int = 9) -> bytes:
     output = BytesIO()
     Image.new("RGB", (width, height), color="navy").save(output, format="JPEG")
@@ -30,6 +40,7 @@ def _settings(**overrides: object) -> PiKVMSettings:
         "base_url": "https://pikvm.example",
         "username": "operator",
         "password": "secret",
+        "totp_required": False,
         "verify_ssl": False,
         "retry_backoff": 0,
     }
@@ -53,16 +64,20 @@ def test_get_screenshot_uses_auth_and_returns_typed_image() -> None:
 
 
 def test_totp_code_is_appended_to_password_for_request() -> None:
+    provider = _TotpProvider("123456")
+
     def handler(request: httpx.Request) -> httpx.Response:
         assert request.headers["X-KVMD-Passwd"] == "secret123456"
         return httpx.Response(200, headers={"Content-Type": "image/jpeg"}, content=_jpeg())
 
     with PiKVMClient(
-        _settings(),
-        totp_code="123456",
+        _settings(totp_required=True),
+        totp_provider=provider,
         transport=httpx.MockTransport(handler),
     ) as client:
         client.get_screenshot()
+
+    assert provider.calls == 1
 
 
 @pytest.mark.parametrize(
@@ -71,7 +86,15 @@ def test_totp_code_is_appended_to_password_for_request() -> None:
 )
 def test_totp_code_must_be_six_ascii_digits(code: str) -> None:
     with pytest.raises(PiKVMConfigurationError, match="exactly six digits"):
-        PiKVMClient(_settings(), totp_code=code)
+        PiKVMClient(
+            _settings(totp_required=True),
+            totp_provider=_TotpProvider(code),
+        )
+
+
+def test_totp_provider_is_required_when_2fa_is_enabled() -> None:
+    with pytest.raises(PiKVMConfigurationError, match="no TOTP provider"):
+        PiKVMClient(_settings(totp_required=True))
 
 
 def test_get_screenshot_retries_transient_read_failure() -> None:
@@ -177,6 +200,21 @@ def test_hid_methods_use_documented_endpoints_and_pixel_mapping() -> None:
     assert requests[3].url.params["to_y"] == "32767"
     assert requests[4].url.params["to_x"] == "32767"
     assert requests[4].url.params["to_y"] == "-32768"
+
+
+def test_coordinate_click_waits_briefly_after_absolute_mouse_move() -> None:
+    delays: list[float] = []
+    transport = httpx.MockTransport(lambda _: httpx.Response(200, json={"ok": True, "result": {}}))
+
+    with PiKVMClient(
+        _settings(mouse_move_settle_seconds=0.15),
+        transport=transport,
+        sleeper=delays.append,
+    ) as client:
+        client.click(100, 200, screen_size=ScreenSize(1920, 1080))
+        client.click()
+
+    assert delays == [0.15]
 
 
 def test_mouse_coordinates_are_bounds_checked_before_request() -> None:

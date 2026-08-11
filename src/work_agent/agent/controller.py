@@ -22,10 +22,13 @@ from work_agent.agent.models import (
     AgentStep,
     AgentStepSummary,
     ApprovalMode,
+    ClickElementAction,
     ControllerState,
+    DoubleClickElementAction,
     ExecutionResult,
     ExecutionTransportStatus,
     FinishAction,
+    MoveMouseAction,
     PolicyDecision,
     PolicyDecisionKind,
     RequestUserAction,
@@ -48,12 +51,14 @@ from work_agent.vision import (
     ActionVerification,
     AnalysisOptions,
     AnalysisUsage,
+    ImageDetail,
     ObservationContext,
     ScreenAnalysis,
     ScreenAnalyzer,
     ScreenObservation,
     VerificationStatus,
     VisionError,
+    normalized_to_pixel,
 )
 
 
@@ -65,6 +70,7 @@ class ControllerOptions:
     step_mode: bool = False
     dry_run: bool = False
     vision_model: str | None = None
+    vision_detail: ImageDetail | None = None
 
     def __post_init__(self) -> None:
         if not 1 <= self.max_steps <= HARD_MAX_STEPS:
@@ -93,6 +99,7 @@ class ControllerOptions:
         step_mode: bool = False,
         dry_run: bool = False,
         vision_model: str | None = None,
+        vision_detail: ImageDetail | None = None,
     ) -> ControllerOptions:
         configured_steps = settings.max_steps if max_steps is None else max_steps
         configured_timeout = (
@@ -105,6 +112,7 @@ class ControllerOptions:
             step_mode=step_mode,
             dry_run=dry_run,
             vision_model=vision_model,
+            vision_detail=vision_detail,
         )
 
 
@@ -141,6 +149,11 @@ class AgentController:
         options: ControllerOptions,
         debug_artifacts: DebugArtifacts | None = None,
         event_sink: Callable[[str], None] | None = None,
+        observation_sink: Callable[[ScreenAnalysis], None] | None = None,
+        completion_validator: Callable[[ScreenAnalysis], str | None] | None = None,
+        verification_override: (
+            Callable[[ScreenAnalysis, ActionVerification], ActionVerification | None] | None
+        ) = None,
         clock: Callable[[], float] = time.monotonic,
         now: Callable[[], datetime] | None = None,
     ) -> None:
@@ -156,6 +169,9 @@ class AgentController:
         self._options = options
         self._debug = debug_artifacts or DebugArtifacts(None)
         self._event_sink = event_sink or (lambda _: None)
+        self._observation_sink = observation_sink or (lambda _: None)
+        self._completion_validator = completion_validator
+        self._verification_override = verification_override
         self._clock = clock
         self._now = now or (lambda: datetime.now(UTC))
         self._state = ControllerState.INITIALIZING
@@ -201,6 +217,7 @@ class AgentController:
                     counters=counters,
                 )
                 analysis = observation.analysis
+                self._observation_sink(analysis)
 
                 if previous_execution is not None:
                     verification = observation.previous_action_verification
@@ -214,6 +231,10 @@ class AgentController:
                             counters,
                             history,
                         )
+                    if self._verification_override is not None:
+                        overridden = self._verification_override(analysis, verification)
+                        if overridden is not None:
+                            verification = overridden
                     self._transition(ControllerState.VERIFYING)
                     history[-1] = history[-1].model_copy(update={"verification": verification})
                     self._debug.save_verification(history[-1].step_number, verification)
@@ -285,8 +306,10 @@ class AgentController:
                 counters.retries += planning.retries
                 counters.model_latency_seconds += planning.latency_seconds
                 proposal = planning.proposal
+                target_coordinates = self._target_coordinates(proposal, analysis)
                 self._event_sink(
                     f"Proposal: {action_summary(proposal.action)} "
+                    f"{target_coordinates}"
                     f"(confidence {proposal.confidence:.2f}, risk {proposal.risk.value})"
                 )
 
@@ -343,6 +366,18 @@ class AgentController:
                 history.append(step)
 
                 if isinstance(proposal.action, FinishAction):
+                    if self._completion_validator is not None:
+                        validation_error = self._completion_validator(analysis)
+                        if validation_error is not None:
+                            return self._failure(
+                                validation_error,
+                                normalized_objective,
+                                session_id,
+                                started_at,
+                                started_clock,
+                                counters,
+                                history,
+                            )
                     return self._finish(
                         status=AgentFinalStatus.SUCCESS,
                         summary=proposal.action.summary,
@@ -479,7 +514,9 @@ class AgentController:
                 self._debug.save_after(step_number, settled.screenshot)
                 self._event_sink(
                     f"Screen settle: changed={'yes' if settled.changed else 'no'}, "
-                    f"stable={'yes' if settled.stable else 'no'}"
+                    f"stable={'yes' if settled.stable else 'no'}, "
+                    f"difference={settled.difference:.4f}, "
+                    f"timed_out={'yes' if settled.timed_out else 'no'}"
                 )
                 if settled.changed:
                     no_change_steps = 0
@@ -547,9 +584,12 @@ class AgentController:
             context=context,
             width=screenshot.size.width,
             height=screenshot.size.height,
-            options=AnalysisOptions(model=self._options.vision_model),
+            options=AnalysisOptions(
+                model=self._options.vision_model,
+                image_detail=self._options.vision_detail,
+            ),
         )
-        counters.vision_calls += 1
+        counters.vision_calls += observation.vision_calls
         counters.vision_usage += observation.analysis.usage
         counters.retries += observation.analysis.retries
         counters.model_latency_seconds += observation.analysis.latency_seconds
@@ -561,6 +601,28 @@ class AgentController:
         if not analysis.safe_to_continue:
             return analysis.stop_reason or "The current screen is unsafe to continue from."
         return None
+
+    @staticmethod
+    def _target_coordinates(proposal: ActionProposal, analysis: ScreenAnalysis) -> str:
+        action = proposal.action
+        if not isinstance(
+            action,
+            (ClickElementAction, DoubleClickElementAction, MoveMouseAction),
+        ):
+            return ""
+        elements = ([analysis.target] if analysis.target is not None else []) + list(
+            analysis.relevant_elements
+        )
+        element = next((item for item in elements if item.id == action.element_id), None)
+        if element is None or element.click_point is None:
+            return "target=unresolved "
+        point = element.click_point
+        pixel = normalized_to_pixel(
+            point,
+            width=analysis.screenshot_width,
+            height=analysis.screenshot_height,
+        )
+        return f"target=({point.x},{point.y})→({pixel.x},{pixel.y}px) "
 
     def _appears_stuck(self, history: list[AgentStep]) -> bool:
         current = history[-1]

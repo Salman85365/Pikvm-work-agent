@@ -10,6 +10,7 @@ from work_agent.pikvm import (
     Screenshot,
     ScreenSize,
 )
+from work_agent.pikvm.totp import TotpProvider
 
 
 class PiKVMSession:
@@ -19,14 +20,15 @@ class PiKVMSession:
         self,
         settings: PiKVMSettings,
         *,
-        totp_provider: Callable[[], str],
-        client_factory: Callable[[str | None], PiKVMClient] | None = None,
+        totp_provider: TotpProvider,
+        client_factory: Callable[[TotpProvider | None], PiKVMClient] | None = None,
     ) -> None:
         self._settings = settings
         self._totp_provider = totp_provider
         self._client_factory = client_factory or (
-            lambda code: PiKVMClient(settings, totp_code=code)
+            lambda provider: PiKVMClient(settings, totp_provider=provider)
         )
+        self._reauthentication_count = 0
         self._client = self._new_client()
 
     def __enter__(self) -> PiKVMSession:
@@ -38,12 +40,23 @@ class PiKVMSession:
     def close(self) -> None:
         self._client.close()
 
+    @property
+    def reauthentication_count(self) -> int:
+        return self._reauthentication_count
+
     def get_screenshot(self) -> Screenshot:
         try:
             return self._client.get_screenshot()
         except PiKVMAuthenticationError:
             self._refresh_client()
-            return self._client.get_screenshot()
+            try:
+                return self._client.get_screenshot()
+            except PiKVMAuthenticationError:
+                raise PiKVMAuthenticationError(
+                    "PiKVM rejected the credentials after a fresh TOTP was generated. "
+                    "Check the username/password and, if they are correct, verify the Mac's "
+                    "system clock."
+                ) from None
 
     def press_key(self, key: str) -> None:
         self._client.press_key(key)
@@ -94,9 +107,10 @@ class PiKVMSession:
         self._client.scroll(delta_y, delta_x=delta_x)
 
     def _new_client(self) -> PiKVMClient:
-        code = self._totp_provider() if self._settings.totp_required else None
-        return self._client_factory(code)
+        provider = self._totp_provider if self._settings.totp_required else None
+        return self._client_factory(provider)
 
     def _refresh_client(self) -> None:
         self._client.close()
+        self._reauthentication_count += 1
         self._client = self._new_client()

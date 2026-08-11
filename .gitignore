@@ -14,10 +14,15 @@ htmlcov/
 artifacts/
 debug-screenshots/
 .local-debug/
+.local-secrets/
 private-screenshots/
 evals/private/
+*.totp-qr.png
+*.totp-qr.jpg
+*.totp-qr.jpeg
 *analysis-overlay*.jpg
 *analysis-overlay*.jpeg
 *analysis-overlay*.png
 pikvm-screen.jpg
+keychain-auth-test.jpg
 pikvm-screenshot-*.jpg

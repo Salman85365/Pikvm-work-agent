@@ -19,6 +19,7 @@ from work_agent.pikvm.errors import (
     PiKVMTimeoutError,
 )
 from work_agent.pikvm.models import MouseButton, Screenshot, ScreenSize
+from work_agent.pikvm.totp import TotpProvider, validate_totp_code
 
 _RETRYABLE_STATUS_CODES = frozenset({429, 502, 503, 504})
 _HID_MIN = -32768
@@ -35,7 +36,7 @@ class PiKVMClient:
         self,
         settings: PiKVMSettings,
         *,
-        totp_code: str | None = None,
+        totp_provider: TotpProvider | None = None,
         transport: httpx.BaseTransport | None = None,
         sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
@@ -46,15 +47,12 @@ class PiKVMClient:
             connect=settings.connect_timeout,
         )
         password = settings.password
-        if totp_code is not None:
-            normalized_totp = totp_code.strip()
-            if (
-                len(normalized_totp) != 6
-                or not normalized_totp.isascii()
-                or not normalized_totp.isdigit()
-            ):
-                raise PiKVMConfigurationError("PiKVM 2FA code must be exactly six digits.")
-            password += normalized_totp
+        if settings.totp_required:
+            if totp_provider is None:
+                raise PiKVMConfigurationError(
+                    "PiKVM 2FA is enabled but no TOTP provider was configured."
+                )
+            password += validate_totp_code(totp_provider.current_code())
 
         self._http = httpx.Client(
             base_url=f"{settings.base_url}/",
@@ -171,7 +169,8 @@ class PiKVMClient:
     ) -> None:
         """Optionally move to a screenshot pixel and click once."""
 
-        self._move_if_requested(x, y, screen_size)
+        if self._move_if_requested(x, y, screen_size):
+            self._wait_after_mouse_move()
         self._post_hid_action(
             "api/hid/events/send_mouse_button",
             params={"button": button.value},
@@ -190,7 +189,8 @@ class PiKVMClient:
 
         if not 0 <= interval <= 1:
             raise ValueError("Double-click interval must be between 0 and 1 second.")
-        self._move_if_requested(x, y, screen_size)
+        if self._move_if_requested(x, y, screen_size):
+            self._wait_after_mouse_move()
         for index in range(2):
             self._post_hid_action(
                 "api/hid/events/send_mouse_button",
@@ -214,13 +214,18 @@ class PiKVMClient:
         x: int | None,
         y: int | None,
         screen_size: ScreenSize | None,
-    ) -> None:
+    ) -> bool:
         coordinate_values = (x, y, screen_size)
         if all(value is None for value in coordinate_values):
-            return
+            return False
         if x is None or y is None or screen_size is None:
             raise ValueError("x, y, and screen_size must be provided together.")
         self.move_mouse(x, y, screen_size=screen_size)
+        return True
+
+    def _wait_after_mouse_move(self) -> None:
+        if self._settings.mouse_move_settle_seconds:
+            self._sleeper(self._settings.mouse_move_settle_seconds)
 
     def _post_hid_action(
         self,

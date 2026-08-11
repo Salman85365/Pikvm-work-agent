@@ -1,29 +1,77 @@
 """PiKVM transport primitives."""
 
 from work_agent.pikvm.client import PiKVMClient
-from work_agent.pikvm.config import PiKVMSettings
+from work_agent.pikvm.config import (
+    DEFAULT_TOTP_KEYCHAIN_SERVICE,
+    PiKVMSettings,
+    TotpProviderKind,
+    configured_pikvm_profiles,
+)
 from work_agent.pikvm.errors import (
     PiKVMAuthenticationError,
     PiKVMConfigurationError,
     PiKVMConnectionError,
     PiKVMError,
+    PiKVMKeychainError,
+    PiKVMKeychainMissingError,
     PiKVMProtocolError,
+    PiKVMQrError,
     PiKVMResponseError,
     PiKVMTimeoutError,
+    PiKVMTotpError,
+    PiKVMTotpSecretError,
 )
 from work_agent.pikvm.models import MouseButton, Screenshot, ScreenSize
+from work_agent.pikvm.qr import QrDecoder, ZxingQrDecoder, decode_totp_qr
+from work_agent.pikvm.totp import (
+    FallbackTotpProvider,
+    InteractiveTotpProvider,
+    KeychainTotpProvider,
+    KeyringSecretStore,
+    SecretStore,
+    TotpProvider,
+    build_totp_provider,
+    endpoint_url,
+    generate_totp_code,
+    normalize_pikvm_host,
+    normalize_totp_seed,
+    normalize_totp_uri,
+)
 
 __all__ = [
+    "DEFAULT_TOTP_KEYCHAIN_SERVICE",
+    "FallbackTotpProvider",
+    "InteractiveTotpProvider",
+    "KeychainTotpProvider",
+    "KeyringSecretStore",
     "MouseButton",
     "PiKVMAuthenticationError",
     "PiKVMClient",
     "PiKVMConfigurationError",
     "PiKVMConnectionError",
     "PiKVMError",
+    "PiKVMKeychainError",
+    "PiKVMKeychainMissingError",
     "PiKVMProtocolError",
+    "PiKVMQrError",
     "PiKVMResponseError",
     "PiKVMSettings",
     "PiKVMTimeoutError",
+    "PiKVMTotpError",
+    "PiKVMTotpSecretError",
+    "QrDecoder",
     "ScreenSize",
     "Screenshot",
+    "SecretStore",
+    "TotpProvider",
+    "TotpProviderKind",
+    "ZxingQrDecoder",
+    "build_totp_provider",
+    "configured_pikvm_profiles",
+    "decode_totp_qr",
+    "endpoint_url",
+    "generate_totp_code",
+    "normalize_pikvm_host",
+    "normalize_totp_seed",
+    "normalize_totp_uri",
 ]

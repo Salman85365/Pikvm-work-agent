@@ -11,6 +11,7 @@ from PIL import Image
 
 from work_agent import cli
 from work_agent.pikvm import MouseButton, PiKVMTimeoutError, Screenshot, ScreenSize
+from work_agent.slack.models import Availability, AvailabilityBatchResult, AvailabilityResult
 from work_agent.vision import (
     AnalysisUsage,
     ImageDetail,
@@ -25,8 +26,10 @@ class _FakeClient:
     received_totp_code: str | None = None
     calls: ClassVar[list[tuple[str, tuple[object, ...], dict[str, object]]]] = []
 
-    def __init__(self, _: object, *, totp_code: str | None = None) -> None:
-        type(self).received_totp_code = totp_code
+    def __init__(self, settings: object, *, totp_provider: object) -> None:
+        type(self).received_totp_code = (
+            totp_provider.current_code() if settings.totp_required else None
+        )
 
     def __enter__(self) -> _FakeClient:
         return self
@@ -74,6 +77,14 @@ class _FailingClient(_FakeClient):
     def press_key(self, key: str) -> None:
         super().press_key(key)
         raise PiKVMTimeoutError("PiKVM timed out; the HID outcome is uncertain.")
+
+
+class _TotpProvider:
+    def __init__(self, code: str = "123456") -> None:
+        self.code = code
+
+    def current_code(self) -> str:
+        return self.code
 
 
 class _FakeAnalyzer:
@@ -145,8 +156,9 @@ def _configure_cli(
     settings = type("Settings", (), {"totp_required": totp_required})()
     client_type.received_totp_code = None
     client_type.calls = []
-    monkeypatch.setattr(cli.PiKVMSettings, "from_env", lambda: settings)
-    monkeypatch.setattr(cli, "PiKVMClient", client_type)
+    monkeypatch.setattr(cli.PiKVMSettings, "from_env", lambda _profile=None: settings)
+    monkeypatch.setattr(cli, "_totp_provider", lambda _: _TotpProvider())
+    monkeypatch.setattr(cli, "PiKVMSession", client_type)
 
 
 def _configure_vision_cli(monkeypatch: pytest.MonkeyPatch) -> object:
@@ -198,6 +210,31 @@ def test_screenshot_can_skip_totp_prompt(
 
     assert cli.run(["screenshot", "--output", str(output)]) == 0
     assert _FakeClient.received_totp_code is None
+
+
+def test_global_profile_is_propagated_to_pikvm_configuration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output = tmp_path / "profile-screen.jpg"
+    settings = type("Settings", (), {"totp_required": False})()
+    selected_profiles: list[str | None] = []
+    _FakeClient.received_totp_code = None
+    _FakeClient.calls = []
+    monkeypatch.setattr(
+        cli.PiKVMSettings,
+        "from_env",
+        lambda profile=None: selected_profiles.append(profile) or settings,
+    )
+    monkeypatch.setattr(cli, "_totp_provider", lambda _: _TotpProvider())
+    monkeypatch.setattr(cli, "PiKVMSession", _FakeClient)
+
+    exit_code = cli.run(["--profile", "lab-kvm", "screenshot", "--output", str(output)])
+
+    assert exit_code == 0
+    assert selected_profiles == ["lab-kvm"]
+    assert _FakeClient.received_totp_code is None
+    assert _FakeClient.calls == [("get_screenshot", (), {})]
 
 
 @pytest.mark.parametrize(
@@ -406,3 +443,71 @@ def test_analyze_screen_captures_once_and_never_calls_hid(
     assert _FakeClient.calls == [("get_screenshot", (), {})]
     assert len(_FakeAnalyzer.calls) == 1
     assert _FakeAnalyzer.calls[0]["screenshot"] == b"jpeg bytes"
+
+
+def test_slack_availability_command_routes_without_generic_pikvm_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    received: list[object] = []
+
+    def execute(args: object) -> AvailabilityBatchResult:
+        received.append(args)
+        return AvailabilityBatchResult(
+            results=(
+                AvailabilityResult(
+                    kvm="work-kvm",
+                    desired=Availability.ACTIVE,
+                    observed=Availability.ACTIVE,
+                    changed=False,
+                    success=True,
+                ),
+            )
+        )
+
+    monkeypatch.setattr(cli, "execute_slack_command", execute)
+    monkeypatch.setattr(
+        cli.PiKVMSettings,
+        "from_env",
+        lambda *_: (_ for _ in ()).throw(AssertionError("must use Slack workflow")),
+    )
+
+    exit_code = cli.run(["slack", "availability", "set", "active", "--kvm", "work-kvm"])
+
+    assert exit_code == 0
+    assert received[0].availability is Availability.ACTIVE
+    assert received[0].kvm == "work-kvm"
+    assert "already set; no-op" in capsys.readouterr().out
+
+
+def test_schedule_command_routes_and_preserves_nonzero_status(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "execute_schedule_command",
+        lambda args: (f"schedule action: {args.schedule_action}", 1),
+    )
+
+    exit_code = cli.run(["schedule", "slack-availability", "status"])
+
+    assert exit_code == 1
+    assert "schedule action: status" in capsys.readouterr().out
+
+
+def test_slack_and_schedule_reject_ambiguous_global_profile() -> None:
+    with pytest.raises(SystemExit) as error:
+        cli.run(
+            [
+                "--profile",
+                "work-kvm",
+                "slack",
+                "availability",
+                "get",
+                "--kvm",
+                "work-kvm",
+            ]
+        )
+
+    assert error.value.code == 2

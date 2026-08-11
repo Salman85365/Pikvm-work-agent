@@ -13,6 +13,7 @@ from work_agent.pikvm import (
     PiKVMTimeoutError,
     Screenshot,
     ScreenSize,
+    TotpProvider,
 )
 
 
@@ -41,6 +42,14 @@ class _Client:
         raise PiKVMTimeoutError("ambiguous HID timeout")
 
 
+class _TotpProvider:
+    def __init__(self, codes: list[str]) -> None:
+        self.codes = iter(codes)
+
+    def current_code(self) -> str:
+        return next(self.codes)
+
+
 def _settings() -> PiKVMSettings:
     return PiKVMSettings(
         base_url="https://pikvm.test",
@@ -54,16 +63,18 @@ def test_read_only_authentication_refresh_prompts_and_retries_once() -> None:
     first = _Client(screenshot_error=PiKVMAuthenticationError("expired"))
     second = _Client()
     clients = iter([first, second])
-    codes = iter(["111111", "222222"])
+    provider = _TotpProvider(["111111", "222222"])
     supplied_codes: list[str | None] = []
 
-    def factory(code: str | None) -> PiKVMClient:
-        supplied_codes.append(code)
+    def factory(selected_provider: TotpProvider | None) -> PiKVMClient:
+        supplied_codes.append(
+            selected_provider.current_code() if selected_provider is not None else None
+        )
         return cast(PiKVMClient, next(clients))
 
     with PiKVMSession(
         _settings(),
-        totp_provider=lambda: next(codes),
+        totp_provider=provider,
         client_factory=factory,
     ) as session:
         screenshot = session.get_screenshot()
@@ -72,6 +83,7 @@ def test_read_only_authentication_refresh_prompts_and_retries_once() -> None:
     assert supplied_codes == ["111111", "222222"]
     assert first.screenshot_calls == 1
     assert second.screenshot_calls == 1
+    assert session.reauthentication_count == 1
     assert first.closed is True
     assert second.closed is True
 
@@ -80,14 +92,18 @@ def test_ambiguous_hid_failure_is_never_retried_or_reauthenticated() -> None:
     client = _Client()
     supplied_codes: list[str | None] = []
 
-    def factory(code: str | None) -> PiKVMClient:
-        supplied_codes.append(code)
+    provider = _TotpProvider(["111111"])
+
+    def factory(selected_provider: TotpProvider | None) -> PiKVMClient:
+        supplied_codes.append(
+            selected_provider.current_code() if selected_provider is not None else None
+        )
         return cast(PiKVMClient, client)
 
     with (
         PiKVMSession(
             _settings(),
-            totp_provider=lambda: "111111",
+            totp_provider=provider,
             client_factory=factory,
         ) as session,
         pytest.raises(PiKVMTimeoutError),
@@ -96,3 +112,30 @@ def test_ambiguous_hid_failure_is_never_retried_or_reauthenticated() -> None:
 
     assert client.key_calls == 1
     assert supplied_codes == ["111111"]
+    assert session.reauthentication_count == 0
+
+
+def test_repeated_read_authentication_failure_suggests_clock_check() -> None:
+    first = _Client(screenshot_error=PiKVMAuthenticationError("expired"))
+    second = _Client(screenshot_error=PiKVMAuthenticationError("still rejected"))
+    clients = iter([first, second])
+    provider = _TotpProvider(["111111", "222222"])
+    supplied_codes: list[str] = []
+
+    def factory(selected_provider: TotpProvider | None) -> PiKVMClient:
+        assert selected_provider is not None
+        supplied_codes.append(selected_provider.current_code())
+        return cast(PiKVMClient, next(clients))
+
+    with (
+        PiKVMSession(
+            _settings(),
+            totp_provider=provider,
+            client_factory=factory,
+        ) as session,
+        pytest.raises(PiKVMAuthenticationError, match="system clock"),
+    ):
+        session.get_screenshot()
+
+    assert supplied_codes == ["111111", "222222"]
+    assert session.reauthentication_count == 1

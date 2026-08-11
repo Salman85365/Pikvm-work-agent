@@ -129,6 +129,7 @@ class _Session:
 
     def __init__(self, _: object, *, totp_provider: object) -> None:
         type(self).instance = self
+        self.totp_provider = totp_provider
         self.screenshots: list[Screenshot] = []
         self.hid_calls: list[str] = []
 
@@ -181,6 +182,11 @@ class _Settler:
         )
 
 
+class _TotpProvider:
+    def current_code(self) -> str:
+        return "123456"
+
+
 class _Approval:
     confirmations: ClassVar[int] = 0
 
@@ -217,7 +223,7 @@ def _configure(monkeypatch: pytest.MonkeyPatch, screenshots: list[Screenshot]) -
     )
     monkeypatch.setattr(agent_cli.AgentSettings, "from_env", lambda: settings)
     monkeypatch.setattr(agent_cli.VisionSettings, "from_env", lambda: vision)
-    monkeypatch.setattr(agent_cli.PiKVMSettings, "from_env", lambda: pikvm)
+    monkeypatch.setattr(agent_cli.PiKVMSettings, "from_env", lambda _profile=None: pikvm)
     monkeypatch.setattr(agent_cli.ControllerLock, "for_endpoint", lambda _: nullcontext())
     monkeypatch.setattr(agent_cli, "PiKVMSession", _Session)
     monkeypatch.setattr(agent_cli, "OpenAIScreenAnalyzer", _Analyzer)
@@ -256,11 +262,54 @@ def test_agent_run_dry_run_performs_zero_hid_calls(monkeypatch: pytest.MonkeyPat
         dry_run=True,
     )
 
-    result = agent_cli.execute_agent_command(args, totp_provider=lambda: "123456")
+    provider = _TotpProvider()
+    monkeypatch.setattr(agent_cli, "build_totp_provider", lambda _: provider)
+
+    result = agent_cli.execute_agent_command(args)
 
     assert result.status is AgentFinalStatus.DRY_RUN
     assert _Session.instance is not None
+    assert _Session.instance.totp_provider is provider
     assert _Session.instance.hid_calls == []
+
+
+def test_agent_run_propagates_named_pikvm_profile(monkeypatch: pytest.MonkeyPatch) -> None:
+    _configure(monkeypatch, [_screenshot("white")])
+    _Analyzer.observations = [
+        ScreenObservation(analysis=_analysis(), previous_action_verification=None)
+    ]
+    _Planner.proposals = [_proposal()]
+    selected_profiles: list[str | None] = []
+    pikvm = PiKVMSettings(
+        base_url="https://lab-pikvm.test",
+        username="user",
+        password="password",
+        profile="lab-kvm",
+        totp_required=False,
+    )
+    monkeypatch.setattr(
+        agent_cli.PiKVMSettings,
+        "from_env",
+        lambda profile=None: selected_profiles.append(profile) or pikvm,
+    )
+    args = argparse.Namespace(
+        command="agent-run",
+        profile="lab-kvm",
+        objective="Open Slack",
+        timeout=None,
+        approval_mode=ApprovalMode.SAFE,
+        debug_dir=None,
+        vision_model=None,
+        planner_model=None,
+        max_steps=8,
+        step=False,
+        dry_run=True,
+    )
+
+    result = agent_cli.execute_agent_command(args, totp_provider=_TotpProvider())
+
+    assert result.status is AgentFinalStatus.DRY_RUN
+    assert selected_profiles == ["lab-kvm"]
 
 
 def test_agent_step_execute_sends_at_most_one_action_and_verifies_it(
@@ -293,7 +342,7 @@ def test_agent_step_execute_sends_at_most_one_action_and_verifies_it(
         execute=True,
     )
 
-    result = agent_cli.execute_agent_command(args, totp_provider=lambda: "123456")
+    result = agent_cli.execute_agent_command(args, totp_provider=_TotpProvider())
 
     assert result.status is AgentFinalStatus.PAUSED
     assert result.history[0].verification is not None

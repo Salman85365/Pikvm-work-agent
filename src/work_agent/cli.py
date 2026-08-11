@@ -14,13 +14,24 @@ from work_agent.agent.cli import (
     result_exit_code,
 )
 from work_agent.agent.errors import AgentError
+from work_agent.agent.pikvm_session import PiKVMSession
+from work_agent.auth_cli import add_auth_parser, execute_auth_command
 from work_agent.pikvm import (
     MouseButton,
-    PiKVMClient,
     PiKVMError,
     PiKVMSettings,
     ScreenSize,
+    TotpProvider,
+    build_totp_provider,
 )
+from work_agent.schedule.cli import add_schedule_parser, execute_schedule_command
+from work_agent.schedule.errors import ScheduleError
+from work_agent.slack.cli import (
+    add_slack_parser,
+    execute_slack_command,
+    format_availability_batch,
+)
+from work_agent.slack.errors import SlackAvailabilityError
 from work_agent.vision import (
     AnalysisOptions,
     ImageDetail,
@@ -135,6 +146,11 @@ def build_parser() -> argparse.ArgumentParser:
             "analysis commands never act; agent actions are locally gated and verified."
         ),
     )
+    parser.add_argument(
+        "--profile",
+        default=None,
+        help="Named PiKVM profile from PIKVM_PROFILES (must precede the command).",
+    )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     screenshot = subparsers.add_parser(
@@ -238,20 +254,32 @@ def build_parser() -> argparse.ArgumentParser:
         help="Capture and analyze exactly one PiKVM screenshot without HID actions.",
     )
     _add_analysis_arguments(analyze_screen)
+    add_auth_parser(subparsers)
     add_agent_parsers(subparsers)
+    add_slack_parser(subparsers)
+    add_schedule_parser(subparsers)
     return parser
 
 
-def _prompt_totp_code() -> str:
+def _prompt_totp_code(prompt: str = "PiKVM 2FA code: ") -> str:
     try:
-        return getpass.getpass("PiKVM 2FA code: ")
+        return getpass.getpass(prompt)
     except EOFError as exc:
         raise PiKVMError(
             "Could not read a 2FA code. Run this command in an interactive terminal."
         ) from exc
 
 
+def _totp_provider(settings: PiKVMSettings) -> TotpProvider:
+    return build_totp_provider(settings, interactive_prompt=_prompt_totp_code)
+
+
 def _validate_command(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    if args.command in {"slack", "schedule"} and args.profile is not None:
+        parser.error(
+            "--profile is not used by Slack workflows; pass --kvm or use the scheduled "
+            "all-KVM flow."
+        )
     if args.command == "type" and not args.text:
         parser.error("type text cannot be empty")
     if args.command == "mouse-move":
@@ -263,7 +291,7 @@ def _validate_command(parser: argparse.ArgumentParser, args: argparse.Namespace)
         parser.error("at least one scroll delta must be non-zero")
 
 
-def _execute_pikvm_command(args: argparse.Namespace, client: PiKVMClient) -> str:
+def _execute_pikvm_command(args: argparse.Namespace, client: PiKVMSession) -> str:
     if args.command == "screenshot":
         output = args.output or _default_screenshot_path()
         screenshot = client.get_screenshot()
@@ -361,10 +389,12 @@ def _execute_analysis(args: argparse.Namespace) -> tuple[ScreenAnalysis, Path | 
         width = image.width
         height = image.height
     elif args.command == "analyze-screen":
-        pikvm_settings = PiKVMSettings.from_env()
-        totp_code = _prompt_totp_code() if pikvm_settings.totp_required else None
-        with PiKVMClient(pikvm_settings, totp_code=totp_code) as client:
-            screenshot = client.get_screenshot()
+        pikvm_settings = PiKVMSettings.from_env(args.profile)
+        with PiKVMSession(
+            pikvm_settings,
+            totp_provider=_totp_provider(pikvm_settings),
+        ) as session:
+            screenshot = session.get_screenshot()
         content = screenshot.content
         width = screenshot.size.width
         height = screenshot.size.height
@@ -389,9 +419,27 @@ def run(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     _validate_command(parser, args)
 
+    if args.command == "slack":
+        try:
+            availability_result = execute_slack_command(args)
+        except (SlackAvailabilityError, PiKVMError, OSError, ValueError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        print(format_availability_batch(availability_result))
+        return 0 if availability_result.success else 1
+
+    if args.command == "schedule":
+        try:
+            schedule_result, exit_code = execute_schedule_command(args)
+        except (ScheduleError, SlackAvailabilityError, PiKVMError, OSError, ValueError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        print(schedule_result)
+        return exit_code
+
     if args.command in {"agent-run", "agent-step"}:
         try:
-            agent_result = execute_agent_command(args, totp_provider=_prompt_totp_code)
+            agent_result = execute_agent_command(args)
         except KeyboardInterrupt:
             print("Agent interrupted before the controller started; no HID action was issued.")
             return 2
@@ -415,11 +463,19 @@ def run(argv: Sequence[str] | None = None) -> int:
             print(f"Saved analysis overlay to {overlay_path.resolve()}", file=sys.stderr)
         return 0
 
+    if args.command == "auth":
+        try:
+            auth_result = execute_auth_command(args)
+        except (PiKVMError, OSError, ValueError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        print(auth_result)
+        return 0
+
     try:
-        settings = PiKVMSettings.from_env()
-        totp_code = _prompt_totp_code() if settings.totp_required else None
-        with PiKVMClient(settings, totp_code=totp_code) as client:
-            result = _execute_pikvm_command(args, client)
+        settings = PiKVMSettings.from_env(args.profile)
+        with PiKVMSession(settings, totp_provider=_totp_provider(settings)) as session:
+            result = _execute_pikvm_command(args, session)
     except (PiKVMError, OSError, ValueError) as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 1

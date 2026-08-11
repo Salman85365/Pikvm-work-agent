@@ -62,3 +62,24 @@ class TerminalApprovalProvider:
         except EOFError:
             return False
         return answer == ""
+
+
+class NonInteractiveApprovalProvider:
+    """Conservatively reject any action that unexpectedly requires approval."""
+
+    def approve(
+        self,
+        *,
+        proposal: ActionProposal,
+        policy: PolicyDecision,
+        objective: str,
+    ) -> bool:
+        return False
+
+    def confirm_step(
+        self,
+        *,
+        proposal: ActionProposal,
+        policy: PolicyDecision,
+    ) -> bool:
+        return False

@@ -68,25 +68,33 @@ Examples:
 
 Use visual reasoning when the UI state genuinely requires it.
 
-## Authentication and PiKVM 2FA
+## Named PiKVM profiles and 2FA
 
-The PiKVM requires two-factor authentication.
+The Mac may control multiple PiKVMs through named local profiles. `PIKVM_PROFILES` lists the names,
+`PIKVM_PROFILE` selects the default, and `pikvm-agent --profile NAME ...` selects one explicitly for
+a command. Every profile has isolated URL, username, password, TLS, network, keymap, and TOTP
+configuration. Never guess a profile when more than one is configured, and never send one profile's
+credentials or HID input to another profile's endpoint.
 
-The existing implementation prompts interactively in the terminal:
+Some PiKVMs require 2FA and others do not. Respect each selected profile's `TOTP_REQUIRED` value.
+When false, do not retrieve a Keychain seed or prompt for a TOTP code. Legacy unprefixed single-KVM
+variables remain supported when named-profile selection is absent.
 
-PiKVM 2FA code:
+For a profile requiring 2FA, normal operation retrieves the exact PiKVM host's raw TOTP seed from
+the dedicated `pikvm-work-agent.totp` macOS Keychain service and generates a current six-digit RFC
+6238 code locally. The seed and generated code must never go to OpenAI, the remote computer, logs,
+telemetry, debug artifacts, `.env`, or project files.
 
-Requirements:
+The preferred enrollment path decodes one PNG/JPEG PiKVM provisioning QR locally with zxing-cpp,
+validates a standard `otpauth://totp` credential, stores its normalized seed in the exact host's
+Keychain item, and verifies it through a harmless PiKVM screenshot read. Never send a provisioning
+QR or URI to OpenAI. Temporary real QR images belong under `.local-secrets/`, which is Git-ignored
+but is not encrypted storage; delete them after successful verification. The runtime never depends
+on the QR after import.
 
-- prompt for a fresh code when authentication is required;
-- input must remain hidden;
-- validate six-digit input;
-- never store the 2FA code;
-- never write the code to logs;
-- never place the code in `.env`;
-- keep the code only in memory for the current authentication attempt.
-
-Do not remove or weaken this behavior unless explicitly requested.
+The existing hidden terminal prompt remains available only through the explicit interactive
+provider or configured fallback. Fallback defaults to false so unattended operation never silently
+blocks for input. Do not disable PiKVM server-side 2FA or touch Apple Passwords/authenticator data.
 
 ## Security and credentials
 
@@ -95,6 +103,7 @@ Never commit:
 - PiKVM usernames;
 - passwords;
 - 2FA codes;
+- TOTP provisioning QR images or URIs;
 - OpenAI API keys;
 - session tokens;
 - secrets.
@@ -210,18 +219,22 @@ For real hardware milestones:
 1. prepare the code;
 2. run local automated verification where possible;
 3. provide the exact command to execute;
-4. allow the user to enter PiKVM 2FA;
+4. allow the user to perform any required local Keychain enrollment or interactive authentication;
 5. inspect the actual resulting output.
 
 ## Current project status
 
-Milestones 1 through 3 are complete and have been validated against the real PiKVM/OpenAI path.
+Milestones 1 through 4 are complete and have been validated against the real PiKVM/OpenAI path.
 
 Implemented:
 
 - typed PiKVM client;
 - PiKVM HTTP authentication;
 - interactive terminal 2FA;
+- automatic local TOTP generation from host-isolated macOS Keychain entries;
+- local TOTP provisioning-QR import with safe post-verification deletion;
+- named multi-PiKVM profiles with independent optional 2FA configuration;
+- bounded read-only reauthentication without HID replay;
 - screenshot retrieval;
 - keyboard transport;
 - text transport;
@@ -249,11 +262,15 @@ The user also validated Milestone 3 against a saved real Slack screenshot and a 
 screenshot. Application recognition, normalized Slack profile-control localization, overlay output,
 and the interactive live 2FA analysis flow all succeeded.
 
-Do not redo Milestones 1 through 3 unless a specific defect requires it.
+Automatic Keychain TOTP and named mixed-2FA PiKVM profiles have also been validated locally.
+
+Do not redo Milestones 1 through 4.5 unless a specific defect requires it.
 
 ## Current next milestone
 
-Milestone 4's bounded generic controller is implemented and awaiting real-hardware validation.
+Milestone 5 Slack manual Active/Away automation is implemented and awaiting real multi-KVM GUI
+validation. It uses the existing controller, sequential named profiles, visible final-state
+verification, sanitized local logs, and Mac-local launchd scheduling/reconciliation.
 
 The controller implements:
 
@@ -267,9 +284,10 @@ Milestone 4 may:
 - verify every executed action from a fresh settled screenshot;
 - stop on uncertainty, unsafe state, stale plans, loops, or configured limits.
 
-Do not mark Milestone 4 complete until the user validates dry-run, approval-every step mode, safe
-navigation to Slack, and opening the Slack profile menu. Do not start Milestone 5, change Slack
-status, or send/read Slack messages during Milestone 4 validation.
+Milestone 5 may only read or change the user's manual Slack Active/Away availability. It must not
+read/send messages, edit status text or emoji, change preferences, or simulate activity. Do not
+start Milestone 6 until real single- and multi-KVM availability transitions and the generated
+LaunchAgents have been validated by the user.
 
 Read-only OpenAI analysis may use bounded transient retries. The existing rule against retrying HID actions remains unchanged.
 

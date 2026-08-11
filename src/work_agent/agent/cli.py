@@ -5,7 +5,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
-from work_agent.agent.approval import TerminalApprovalProvider
+from work_agent.agent.approval import ApprovalProvider, TerminalApprovalProvider
 from work_agent.agent.config import HARD_MAX_RUNTIME_SECONDS, HARD_MAX_STEPS, AgentSettings
 from work_agent.agent.controller import AgentController, ControllerOptions
 from work_agent.agent.debug import DebugArtifacts
@@ -16,8 +16,15 @@ from work_agent.agent.openai_planner import OpenAIActionPlanner
 from work_agent.agent.pikvm_session import PiKVMSession
 from work_agent.agent.policy import PolicyEngine
 from work_agent.agent.screen_change import PreActionGuard, ScreenSettleDetector
-from work_agent.pikvm import PiKVMSettings
-from work_agent.vision import OpenAIScreenAnalyzer, VisionSettings
+from work_agent.pikvm import PiKVMSettings, TotpProvider, build_totp_provider
+from work_agent.vision import (
+    ActionVerification,
+    ImageDetail,
+    OpenAIScreenAnalyzer,
+    ScreenAnalyzer,
+    VisionSettings,
+)
+from work_agent.vision.models import ScreenAnalysis
 
 
 def _objective(raw_value: str) -> str:
@@ -113,14 +120,24 @@ def add_agent_parsers(
 def execute_agent_command(
     args: argparse.Namespace,
     *,
-    totp_provider: Callable[[], str],
+    totp_provider: TotpProvider | None = None,
     output: Callable[[str], None] = print,
+    approval_provider: ApprovalProvider | None = None,
+    observation_sink: Callable[[ScreenAnalysis], None] | None = None,
+    completion_validator: Callable[[ScreenAnalysis], str | None] | None = None,
+    policy_engine: PolicyEngine | None = None,
+    vision_detail: ImageDetail | None = None,
+    verification_override: (
+        Callable[[ScreenAnalysis, ActionVerification], ActionVerification | None] | None
+    ) = None,
+    analyzer_transform: Callable[[ScreenAnalyzer, VisionSettings], ScreenAnalyzer] | None = None,
 ) -> AgentSessionResult:
     agent_settings = AgentSettings.from_env()
     if args.planner_model is not None:
         agent_settings = replace(agent_settings, planner_model=args.planner_model)
     vision_settings = VisionSettings.from_env()
-    pikvm_settings = PiKVMSettings.from_env()
+    pikvm_settings = PiKVMSettings.from_env(getattr(args, "profile", None))
+    selected_totp_provider = totp_provider or build_totp_provider(pikvm_settings)
 
     is_step_command = args.command == "agent-step"
     options = ControllerOptions.from_settings(
@@ -131,6 +148,7 @@ def execute_agent_command(
         step_mode=(args.execute if is_step_command else args.step),
         dry_run=(not args.execute if is_step_command else args.dry_run),
         vision_model=args.vision_model,
+        vision_detail=vision_detail,
     )
     debug = DebugArtifacts(args.debug_dir)
     if debug.enabled:
@@ -143,16 +161,21 @@ def execute_agent_command(
         ControllerLock.for_endpoint(pikvm_settings.base_url),
         PiKVMSession(
             pikvm_settings,
-            totp_provider=totp_provider,
+            totp_provider=selected_totp_provider,
         ) as session,
     ):
-        analyzer = OpenAIScreenAnalyzer(vision_settings)
+        base_analyzer: ScreenAnalyzer = OpenAIScreenAnalyzer(vision_settings)
+        analyzer = (
+            analyzer_transform(base_analyzer, vision_settings)
+            if analyzer_transform is not None
+            else base_analyzer
+        )
         planner = OpenAIActionPlanner(agent_settings)
         controller = AgentController(
             capture=session.get_screenshot,
             analyzer=analyzer,
             planner=planner,
-            policy=PolicyEngine(),
+            policy=policy_engine or PolicyEngine(),
             executor=ActionExecutor(session),
             guard=PreActionGuard(material_change_threshold=agent_settings.stale_screen_threshold),
             settle_detector=ScreenSettleDetector(
@@ -161,11 +184,14 @@ def execute_agent_command(
                 stable_frames=agent_settings.screen_stable_frames,
                 stable_threshold=agent_settings.screen_stable_threshold,
             ),
-            approval_provider=TerminalApprovalProvider(output=output),
+            approval_provider=approval_provider or TerminalApprovalProvider(output=output),
             settings=agent_settings,
             options=options,
             debug_artifacts=debug,
             event_sink=output,
+            observation_sink=observation_sink,
+            completion_validator=completion_validator,
+            verification_override=verification_override,
         )
         return controller.run(args.objective)
 

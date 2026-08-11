@@ -48,10 +48,11 @@ def _screen(
     state: ScreenState = ScreenState.APPLICATION,
     safe: bool = True,
     summary: str = "Application window is visible.",
+    application: str = "Browser",
 ) -> ScreenAnalysis:
     return ScreenAnalysis(
         objective="Navigate",
-        application="Browser",
+        application=application,
         screen_state=state,
         summary=summary,
         target_found=element is not None,
@@ -109,6 +110,43 @@ def test_consequential_target_requires_approval() -> None:
     decision = PolicyEngine().evaluate(proposal, screen)
 
     assert decision.decision is PolicyDecisionKind.REQUIRE_APPROVAL
+
+
+def test_visible_slack_availability_toggle_is_the_only_local_edit_click_allowed() -> None:
+    toggle = _screen(
+        element=_element("Set yourself as away", role=UIElementRole.MENU_ITEM),
+        application="Slack",
+    )
+    other_slack_edit = _screen(
+        element=_element("Clear status", role=UIElementRole.MENU_ITEM),
+        application="Slack",
+    )
+    ambiguous_toggle = _screen(
+        element=UIElement(
+            id="target",
+            label="Set yourself as away",
+            role=UIElementRole.MENU_ITEM,
+            visible_text="Set yourself as active",
+            bounding_box=BoundingBox(x1=100, y1=100, x2=200, y2=200),
+            click_point=NormalizedPoint(x=150, y=150),
+            confidence=0.95,
+        ),
+        application="Slack",
+    )
+    proposal = _proposal(
+        ClickElementAction(type="click_element", element_id="target", button="left"),
+        RiskCategory.LOCAL_EDIT,
+    )
+
+    assert PolicyEngine().evaluate(proposal, toggle).decision is PolicyDecisionKind.ALLOW
+    assert (
+        PolicyEngine().evaluate(proposal, other_slack_edit).decision
+        is PolicyDecisionKind.REQUIRE_APPROVAL
+    )
+    assert (
+        PolicyEngine().evaluate(proposal, ambiguous_toggle).decision
+        is PolicyDecisionKind.REQUIRE_APPROVAL
+    )
 
 
 def test_power_target_is_denied() -> None:

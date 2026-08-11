@@ -16,6 +16,7 @@ from work_agent.agent.models import (
     ActionProposal,
     AgentFinalStatus,
     AgentStepSummary,
+    ClickElementAction,
     ExecutionResult,
     FinishAction,
     PlanningResult,
@@ -32,7 +33,9 @@ from work_agent.agent.screen_change import PreActionGuard, ScreenSettleDetector,
 from work_agent.pikvm import Screenshot, ScreenSize
 from work_agent.vision import (
     ActionVerification,
+    BoundingBox,
     ImageDetail,
+    NormalizedPoint,
     ObservationContext,
     ReasoningEffort,
     ScreenAnalysis,
@@ -40,6 +43,8 @@ from work_agent.vision import (
     ScreenObservation,
     ScreenState,
     ServiceTier,
+    UIElement,
+    UIElementRole,
     VerificationStatus,
 )
 
@@ -254,6 +259,11 @@ def _controller(
     approval: _Approval | None = None,
     clock: Callable[[], float] | None = None,
     events: list[str] | None = None,
+    observation_sink: Callable[[ScreenAnalysis], None] | None = None,
+    completion_validator: Callable[[ScreenAnalysis], str | None] | None = None,
+    verification_override: (
+        Callable[[ScreenAnalysis, ActionVerification], ActionVerification | None] | None
+    ) = None,
 ) -> tuple[AgentController, _Remote, _Planner, _Analyzer]:
     captures = iter(screenshots)
     remote = _Remote()
@@ -275,6 +285,9 @@ def _controller(
         settings=settings,
         options=options or ControllerOptions.from_settings(settings),
         event_sink=(events.append if events is not None else None),
+        observation_sink=observation_sink,
+        completion_validator=completion_validator,
+        verification_override=verification_override,
         clock=clock or (lambda: 0.0),
     )
     return controller, remote, planner, analyzer
@@ -297,6 +310,92 @@ def test_objective_already_satisfied_finishes_without_hid() -> None:
     assert remote.calls == []
     assert planner.calls == 1
     assert events.count("State: observing") == 1
+
+
+def test_target_coordinate_trace_reports_normalized_and_pixel_point() -> None:
+    element = UIElement(
+        id="profile",
+        label="Profile",
+        role=UIElementRole.BUTTON,
+        visible_text="",
+        bounding_box=BoundingBox(x1=450, y1=450, x2=550, y2=550),
+        click_point=NormalizedPoint(x=500, y=500),
+        confidence=0.95,
+    )
+    analysis = _analysis().model_copy(
+        update={
+            "target_found": True,
+            "target": element,
+            "relevant_elements": [element],
+        }
+    )
+    proposal = ActionProposal(
+        action=ClickElementAction(type="click_element", element_id="profile", button="left"),
+        expected_outcome="The profile menu opens.",
+        confidence=0.95,
+        risk=RiskCategory.READ_ONLY,
+        reason_summary="Open the profile menu.",
+    )
+
+    assert AgentController._target_coordinates(proposal, analysis) == (
+        "target=(500,500)→(32,16px) "
+    )
+
+
+def test_observation_sink_receives_analysis_and_completion_validator_can_reject() -> None:
+    observed: list[ScreenAnalysis] = []
+    analysis = _analysis()
+    controller, remote, planner, _ = _controller(
+        screenshots=[_screenshot()],
+        observations=[ScreenObservation(analysis=analysis, previous_action_verification=None)],
+        proposals=[_proposal(FinishAction(type="finish", summary="Done."))],
+        observation_sink=observed.append,
+        completion_validator=lambda _: "Visible completion evidence is missing.",
+    )
+
+    result = controller.run("Inspect Slack")
+
+    assert observed == [analysis]
+    assert result.status is AgentFinalStatus.FAILED
+    assert result.summary == "Visible completion evidence is missing."
+    assert planner.calls == 1
+    assert remote.calls == []
+
+
+def test_scoped_verification_override_can_accept_fresh_visible_evidence() -> None:
+    initial = _screenshot("white")
+    controller, remote, _, _ = _controller(
+        screenshots=[initial, initial],
+        settled=[_screenshot("black")],
+        observations=[
+            ScreenObservation(analysis=_analysis(), previous_action_verification=None),
+            ScreenObservation(
+                analysis=_analysis(),
+                previous_action_verification=_verification(VerificationStatus.UNCERTAIN),
+            ),
+        ],
+        proposals=[
+            _proposal(PressKeyAction(type="press_key", key="Escape")),
+            _proposal(FinishAction(type="finish", summary="Verified.")),
+        ],
+        verification_override=lambda analysis, verification: (
+            ActionVerification(
+                status=VerificationStatus.SUCCESS,
+                confidence=analysis.confidence,
+                evidence="Fresh scoped evidence is visible.",
+                expected_outcome_observed=True,
+            )
+            if verification.status is VerificationStatus.UNCERTAIN
+            else None
+        ),
+    )
+
+    result = controller.run("Open Slack")
+
+    assert result.status is AgentFinalStatus.SUCCESS
+    assert result.history[0].verification is not None
+    assert result.history[0].verification.status is VerificationStatus.SUCCESS
+    assert remote.calls == [("press_key", "Escape")]
 
 
 def test_failed_planner_attempt_is_counted() -> None:

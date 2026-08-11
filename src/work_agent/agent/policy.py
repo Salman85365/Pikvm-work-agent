@@ -132,6 +132,14 @@ class PolicyEngine:
                 "The generic controller cannot enter authentication information.",
                 RiskCategory.AUTHENTICATION,
             )
+        if isinstance(action, ClickElementAction) and self._slack_availability_toggle(
+            action.element_id,
+            screen,
+        ):
+            return self._allow(
+                "The visible target is Slack's bounded manual Active/Away toggle.",
+                RiskCategory.LOCAL_EDIT,
+            )
         if proposal.risk in {
             RiskCategory.EXTERNAL_COMMUNICATION,
             RiskCategory.LOCAL_EDIT,
@@ -260,6 +268,21 @@ class PolicyEngine:
                 RiskCategory.UNKNOWN,
             )
         return self._allow("The current target is an ordinary navigation element.")
+
+    @classmethod
+    def _slack_availability_toggle(cls, element_id: str, screen: ScreenAnalysis) -> bool:
+        if screen.application.strip().lower() != "slack":
+            return False
+        element = cls._element(screen, element_id)
+        if element is None or element.role not in {UIElementRole.MENU_ITEM, UIElementRole.BUTTON}:
+            return False
+        allowed = {"set yourself as active", "set yourself as away"}
+        visible_values = {
+            value.strip().lower()
+            for value in (element.label, element.visible_text)
+            if value.strip()
+        }
+        return len(visible_values) == 1 and visible_values.issubset(allowed)
 
     @staticmethod
     def _element(screen: ScreenAnalysis, element_id: str) -> UIElement | None:

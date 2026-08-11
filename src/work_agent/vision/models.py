@@ -207,6 +207,7 @@ class ScreenAnalysis(_StrictModel):
 class ScreenObservation(_StrictModel):
     analysis: ScreenAnalysis
     previous_action_verification: ActionVerification | None
+    vision_calls: int = Field(default=1, ge=1)
 
 
 class AnalysisOptions(_StrictModel):

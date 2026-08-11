@@ -21,6 +21,26 @@ class PiKVMAuthenticationError(PiKVMError):
     """PiKVM rejected the configured credentials."""
 
 
+class PiKVMTotpError(PiKVMError):
+    """A local TOTP provider could not produce a safe current code."""
+
+
+class PiKVMKeychainError(PiKVMTotpError):
+    """macOS Keychain could not service a TOTP credential request."""
+
+
+class PiKVMKeychainMissingError(PiKVMKeychainError):
+    """No TOTP seed exists for the exact requested PiKVM account."""
+
+
+class PiKVMTotpSecretError(PiKVMTotpError):
+    """A supplied or stored TOTP seed is malformed or unsupported."""
+
+
+class PiKVMQrError(PiKVMTotpSecretError):
+    """A local TOTP QR image could not be decoded or validated safely."""
+
+
 class PiKVMResponseError(PiKVMError):
     """PiKVM returned an unsuccessful HTTP response."""
 

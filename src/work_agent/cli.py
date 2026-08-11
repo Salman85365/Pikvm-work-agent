@@ -31,7 +31,9 @@ from work_agent.schedule.errors import ScheduleError
 from work_agent.slack.cli import (
     add_slack_parser,
     execute_slack_command,
+    execute_slack_triage_command,
     format_availability_batch,
+    format_triage_batch,
 )
 from work_agent.slack.errors import SlackAvailabilityError
 from work_agent.vision import (
@@ -436,6 +438,10 @@ def run(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "slack":
         try:
+            if args.slack_command == "triage":
+                triage_result = execute_slack_triage_command(args)
+                print(format_triage_batch(triage_result))
+                return 0 if triage_result.success else 1
             availability_result = execute_slack_command(args)
         except (SlackAvailabilityError, PiKVMError, OSError, ValueError) as exc:
             print(f"Error: {exc}", file=sys.stderr)

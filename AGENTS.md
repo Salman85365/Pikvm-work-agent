@@ -96,6 +96,18 @@ The existing hidden terminal prompt remains available only through the explicit 
 provider or configured fallback. Fallback defaults to false so unattended operation never silently
 blocks for input. Do not disable PiKVM server-side 2FA or touch Apple Passwords/authenticator data.
 
+## Slack scope boundaries
+
+Availability workflows may only read or change the manual Active/Away toggle.
+
+Triage may only read Slack's visible unread sidebar. It must never open, select, or scroll into a
+conversation, channel, DM, or thread: opening one marks it read, which is not reliably reversible and
+destroys the unread signal triage exists to report. Enforce that with the local allowlist policy, not
+with prompt instructions, and keep the perception schema incapable of carrying message text.
+
+Neither workflow may read or send messages, edit status text or emoji, change preferences, or
+simulate activity. Conversation names are Slack content: never persist them to logs or state.
+
 ## Local dashboard
 
 A Mac-local dashboard (`pikvm-agent dashboard`) presents the existing workflows in a browser. It is a

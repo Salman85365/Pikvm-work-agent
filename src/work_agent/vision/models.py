@@ -210,6 +210,20 @@ class ScreenObservation(_StrictModel):
     vision_calls: int = Field(default=1, ge=1)
 
 
+class PerceptionTelemetry(_StrictModel):
+    """Request metadata for a structured perception, separate from the model's own fields."""
+
+    requested_model: str
+    model: str
+    requested_service_tier: ServiceTier
+    service_tier: str | None
+    image_detail: ImageDetail
+    reasoning_effort: ReasoningEffort
+    usage: AnalysisUsage
+    latency_seconds: float = Field(ge=0.0)
+    retries: int = Field(ge=0)
+
+
 class AnalysisOptions(_StrictModel):
     model: str | None = None
     service_tier: ServiceTier | None = None

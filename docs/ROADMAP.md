@@ -11,7 +11,7 @@
 | M4.5 | Automatic PiKVM TOTP from macOS Keychain | Complete, hardware verified |
 | M5 | Slack manual availability skill and scheduling | Implemented; real multi-KVM validation pending |
 | M5.5 | Local operations dashboard | Implemented; automated checks pass |
-| M6 | Slack reading and summarization | Planned |
+| M6 | Slack inbox triage | Sidebar tier implemented; conversation-level triage deferred |
 | M7 | Development-tool skills | Planned |
 | M8 | Higher-level work agent | Planned |
 
@@ -140,6 +140,25 @@ Implemented:
 Automated tests, `ruff`, `ruff format`, and `mypy --strict` pass. The read-only panels and the live
 screenshot path were exercised against the real local environment. Driving a real Slack transition
 from the dashboard is left to the user, since it sends HID to a work computer.
+
+## Milestone 6: Slack inbox triage — sidebar tier implemented
+
+Implemented:
+
+- `slack triage --kvm NAME` and `--all-kvms`, reading Slack's visible unread sidebar;
+- a dedicated strict perception schema with no field capable of holding message text, read through a
+  new reusable `OpenAIScreenAnalyzer.perceive` entry point;
+- an allowlist policy that denies opening, double-clicking, or scrolling a conversation, so the
+  non-destructive guarantee is enforced locally rather than requested in the prompt;
+- separate foregrounding and reading phases, the reading phase having no executor attached;
+- mention / direct-message / other-unread ranking, muted entries dropped, clipped-sidebar reporting;
+- counts-only JSONL logging that never records conversation names.
+
+Deliberately deferred: opening conversations to judge whether a message is a question, a blocker, or
+an approval request. That marks conversations read, which is not reliably reversible and would destroy
+the unread signal triage reports. Revisit only with an explicit decision about that side effect.
+
+Not yet run against real hardware.
 
 ## Later workflow milestones
 

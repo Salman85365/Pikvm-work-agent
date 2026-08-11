@@ -5,6 +5,7 @@ import json
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TypeVar
 
 import openai
 from openai import OpenAI
@@ -15,11 +16,12 @@ from openai.types.responses import (
     ResponseInputTextParam,
 )
 from openai.types.shared_params import Reasoning
-from pydantic import ValidationError
+from pydantic import BaseModel, ValidationError
 
 from work_agent.vision.config import VisionSettings
 from work_agent.vision.errors import (
     VisionAuthenticationError,
+    VisionError,
     VisionImageError,
     VisionNetworkError,
     VisionPermissionError,
@@ -35,6 +37,7 @@ from work_agent.vision.models import (
     AnalysisUsage,
     ImageDetail,
     ObservationContext,
+    PerceptionTelemetry,
     ReasoningEffort,
     SafetyWarning,
     ScreenAnalysis,
@@ -45,6 +48,24 @@ from work_agent.vision.models import (
     ServiceTier,
 )
 from work_agent.vision.prompts import SCREEN_ANALYSIS_PROMPT, SCREEN_OBSERVATION_PROMPT
+
+_PerceptionT = TypeVar("_PerceptionT", bound=BaseModel)
+
+
+def _transient_perception_error(exc: Exception) -> VisionError:
+    if isinstance(exc, openai.RateLimitError):
+        return VisionRateLimitError("OpenAI rate-limited the perception request.")
+    if isinstance(exc, openai.APITimeoutError):
+        return VisionTimeoutError("The OpenAI perception request timed out.")
+    return VisionNetworkError("The OpenAI API could not be reached.")
+
+
+def _perception_request_error(exc: openai.APIStatusError) -> VisionError:
+    if isinstance(exc, openai.AuthenticationError):
+        return VisionAuthenticationError("OpenAI authentication failed. Check the local API key.")
+    if isinstance(exc, openai.PermissionDeniedError):
+        return VisionPermissionError("The OpenAI project cannot access the requested model.")
+    return VisionRequestError("OpenAI rejected the perception request.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -441,6 +462,100 @@ class OpenAIScreenAnalyzer:
             except openai.OpenAIError as exc:
                 raise VisionRequestError("The OpenAI screen-observation request failed.") from exc
 
+    def perceive(
+        self,
+        screenshot: bytes,
+        *,
+        schema: type[_PerceptionT],
+        instructions: str,
+        context: str,
+        width: int,
+        height: int,
+        options: AnalysisOptions | None = None,
+    ) -> tuple[_PerceptionT, PerceptionTelemetry]:
+        """Read one screenshot into an arbitrary strict schema.
+
+        Skills that need richer typed output than UIElement labels can carry use this rather
+        than encoding structure into element text. It issues no HID and returns only what the
+        supplied schema allows.
+        """
+
+        decoded = decode_image(screenshot)
+        if decoded.width != width or decoded.height != height:
+            raise VisionImageError(
+                "The supplied screenshot dimensions do not match the decoded image."
+            )
+
+        selected = options or AnalysisOptions()
+        requested_model = selected.model or self._settings.model
+        service_tier = selected.service_tier or self._settings.service_tier
+        reasoning_effort = selected.reasoning_effort or self._settings.reasoning_effort
+        image_detail = selected.image_detail or self._settings.image_detail
+        data_url = self._data_url(decoded.content, decoded.media_type)
+
+        started = self._clock()
+        retries = 0
+        while True:
+            try:
+                reasoning: Reasoning = {"effort": reasoning_effort.value}
+                response = self._client.responses.parse(
+                    model=requested_model,
+                    instructions=instructions,
+                    input=self._build_perception_input(data_url, context, image_detail),
+                    text_format=schema,
+                    reasoning=reasoning,
+                    service_tier=service_tier.value,
+                    store=False,
+                )
+                perception = response.output_parsed
+                if not isinstance(perception, schema):
+                    raise VisionStructuredOutputError(
+                        "OpenAI returned no valid structured perception."
+                    )
+                telemetry = PerceptionTelemetry(
+                    requested_model=requested_model,
+                    model=response.model,
+                    requested_service_tier=service_tier,
+                    service_tier=response.service_tier,
+                    image_detail=image_detail,
+                    reasoning_effort=reasoning_effort,
+                    usage=self._extract_usage(response.usage),
+                    latency_seconds=max(0.0, self._clock() - started),
+                    retries=retries,
+                )
+                return perception, telemetry
+            except VisionStructuredOutputError:
+                raise
+            except (ValidationError, openai.APIResponseValidationError) as exc:
+                raise VisionStructuredOutputError(
+                    "OpenAI returned an invalid structured perception."
+                ) from exc
+            except (
+                openai.RateLimitError,
+                openai.APITimeoutError,
+                openai.APIConnectionError,
+            ) as exc:
+                if retries >= self._settings.max_retries:
+                    raise _transient_perception_error(exc) from exc
+                self._backoff(retries)
+                retries += 1
+            except openai.APIStatusError as exc:
+                if exc.status_code >= 500:
+                    if retries >= self._settings.max_retries:
+                        raise VisionServerError(
+                            "OpenAI returned a server error during perception."
+                        ) from exc
+                    self._backoff(retries)
+                    retries += 1
+                    continue
+                raise _perception_request_error(exc) from exc
+            except (openai.LengthFinishReasonError, openai.ContentFilterFinishReasonError) as exc:
+                raise VisionStructuredOutputError(
+                    "OpenAI could not complete the structured perception."
+                ) from exc
+            except openai.OpenAIError as exc:
+                raise VisionRequestError("The OpenAI perception request failed.") from exc
+
     def _apply_local_safety(self, perception: ScreenPerception) -> ScreenPerception:
         warnings = list(perception.warnings)
         state_warning = {
@@ -534,6 +649,21 @@ class OpenAIScreenAnalyzer:
             "role": "user",
             "content": [text, image],
         }
+        return [message]
+
+    @staticmethod
+    def _build_perception_input(
+        data_url: str,
+        context: str,
+        image_detail: ImageDetail,
+    ) -> ResponseInputParam:
+        text: ResponseInputTextParam = {"type": "input_text", "text": context}
+        image: ResponseInputImageParam = {
+            "type": "input_image",
+            "image_url": data_url,
+            "detail": image_detail.value,
+        }
+        message: EasyInputMessageParam = {"role": "user", "content": [text, image]}
         return [message]
 
     @staticmethod

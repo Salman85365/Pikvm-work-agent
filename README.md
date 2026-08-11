@@ -345,6 +345,48 @@ from that field rather than from the error text, which is prose and may be rewor
 before this field existed have `stop_code: null` and appear as "Recorded before stop codes existed"
 in the dashboard rather than being guessed at.
 
+## Slack inbox triage
+
+Read what Slack already shows about unread activity, for one KVM or every configured KVM:
+
+```bash
+pikvm-agent slack triage --kvm heidrick
+pikvm-agent slack triage --all-kvms
+```
+
+Output groups unread entries by how much they appear to want:
+
+```text
+heidrick  ✓ needs attention: 2
+    @ #deploys (1)
+    · patrick (2)
+  FYI: 1
+    · #general (7)
+    ! sidebar was clipped; more unread entries may exist below
+```
+
+`@` marks a mention badge, `·` a direct message or an ordinary unread channel.
+
+**This never opens a conversation.** Opening one marks it read in Slack, which cannot be reliably
+undone and would destroy the unread state triage exists to report. The workflow therefore reads only
+the conversation sidebar: names, unread counts, mention badges, and muted state. It runs in two
+separate phases — a bounded controller brings Slack to the foreground, then a plain screenshot is
+read with no executor attached, so the reading phase is structurally incapable of sending HID.
+
+That boundary is enforced by a local allowlist policy, not by asking the model nicely. Triage may
+click only an application launcher labelled exactly `Slack`, use `MetaLeft+Space`, type `slack` into
+a visible search field, and press Enter or Escape. Clicking a sidebar row, double-clicking, and
+scrolling are all denied, and the generic engine's stop conditions still apply first.
+
+Because the sidebar carries no message text, triage reports *that* something is unread, never what it
+says. Ranking mentions above direct messages above channels is the most a non-destructive read
+supports; judging whether a message is a question, a blocker, or an approval request needs the
+conversation opened, which this workflow will not do.
+
+Counts only are recorded to `~/Library/Logs/pikvm-work-agent/slack-triage.jsonl` — the number of
+unread conversations, mentions, and direct messages. Conversation names are Slack content and are
+never written to disk.
+
 ## Mac-local Slack availability schedule
 
 Inspect and exercise reconciliation before installing anything:

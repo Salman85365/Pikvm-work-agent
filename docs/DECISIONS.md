@@ -163,6 +163,39 @@ a separate health check probes what the *already installed* agents would run. `s
 result and exits non-zero when scheduled runs cannot work, so a loaded job is never mistaken for a
 working one.
 
+## Non-destructive Slack triage
+
+Status: accepted and implemented for the sidebar tier.
+
+Reading a Slack conversation through the GUI marks it read. That is a side effect on the user's own
+inbox, is not reliably reversible from automation, and would destroy exactly the unread signal triage
+exists to report — worst of all in an unattended scheduled run. Milestone 6 therefore reads only what
+Slack already displays: sidebar conversation names, unread counts, mention badges, and muted state.
+
+The boundary is enforced locally, not requested in the prompt, because model output is untrusted
+input. `SlackTriagePolicyEngine` is an allowlist: an application launcher labelled exactly `Slack`,
+`MetaLeft+Space`, the literal navigation search text `slack`, and Enter or Escape. Clicking a sidebar
+row, double-clicking, and scrolling are denied, and a conservative stop from the generic engine is
+never overridden. The exact-label match matters: a sidebar entry named `Slack` would otherwise be
+indistinguishable from the Dock icon, so a launcher must additionally carry no extra visible text.
+
+Foregrounding and reading are separate phases. The bounded controller brings Slack forward; the read
+then runs on a plain screenshot with no executor attached, so it cannot send HID at all rather than
+merely being instructed not to.
+
+Structured output is a dedicated strict schema rather than encoded into `UIElement` labels, using a
+new generic `OpenAIScreenAnalyzer.perceive` entry point that later skills can reuse. The schema has
+no field capable of holding message text, so the model cannot return conversation contents even if
+the prompt were ignored — a stronger guarantee than instruction alone.
+
+Ranking is limited to three honest tiers: mention, direct message, other unread. Deciding whether a
+message is a question, a blocker, or an approval request requires opening the conversation, so the
+richer triage the long-term roadmap describes is deliberately deferred rather than approximated.
+
+Only counts are logged. Conversation names are Slack content, and the roadmap forbids persisting
+Slack content locally, so the JSONL record carries unread/mention/direct totals and nothing that
+identifies a channel or person.
+
 ## Two-signal screen-change detection
 
 Status: accepted and implemented.

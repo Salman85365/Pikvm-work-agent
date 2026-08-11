@@ -16,6 +16,8 @@ from work_agent.agent.cli import (
 from work_agent.agent.errors import AgentError
 from work_agent.agent.pikvm_session import PiKVMSession
 from work_agent.auth_cli import add_auth_parser, execute_auth_command
+from work_agent.dashboard.cli import add_dashboard_parser, execute_dashboard_command
+from work_agent.dashboard.errors import DashboardError
 from work_agent.pikvm import (
     MouseButton,
     PiKVMError,
@@ -258,6 +260,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_agent_parsers(subparsers)
     add_slack_parser(subparsers)
     add_schedule_parser(subparsers)
+    add_dashboard_parser(subparsers)
     return parser
 
 
@@ -280,6 +283,8 @@ def _validate_command(parser: argparse.ArgumentParser, args: argparse.Namespace)
             "--profile is not used by Slack workflows; pass --kvm or use the scheduled "
             "all-KVM flow."
         )
+    if args.command == "dashboard" and args.profile is not None:
+        parser.error("--profile is not used by the dashboard; select the KVM in the interface.")
     if args.command == "type" and not args.text:
         parser.error("type text cannot be empty")
     if args.command == "mouse-move":
@@ -418,6 +423,16 @@ def run(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     _validate_command(parser, args)
+
+    if args.command == "dashboard":
+        try:
+            return execute_dashboard_command(args)
+        except KeyboardInterrupt:
+            print("\nDashboard stopped.")
+            return 0
+        except (DashboardError, OSError, ValueError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
 
     if args.command == "slack":
         try:

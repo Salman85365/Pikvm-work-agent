@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="PiKVM Work Agent">
+  <rect width="32" height="32" rx="8" fill="#2a78d6"/>
+  <rect x="8" y="10" width="16" height="11" rx="2" fill="none" stroke="#fcfcfb" stroke-width="2.4"/>
+  <path d="M12 25h8" stroke="#fcfcfb" stroke-width="2.4" stroke-linecap="round"/>
+</svg>

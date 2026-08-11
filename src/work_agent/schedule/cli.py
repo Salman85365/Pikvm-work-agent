@@ -7,7 +7,11 @@ from datetime import UTC, datetime
 
 from work_agent.pikvm import configured_pikvm_profiles
 from work_agent.schedule.errors import ScheduleError
-from work_agent.schedule.launchd import LaunchAgentStatus, SlackAvailabilityLaunchdManager
+from work_agent.schedule.launchd import (
+    LaunchAgentStatus,
+    ScheduleHealth,
+    SlackAvailabilityLaunchdManager,
+)
 from work_agent.schedule.reconcile import desired_availability
 from work_agent.schedule.state import ReconciliationStateStore
 from work_agent.slack.cli import default_slack_availability_service, format_availability_batch
@@ -81,8 +85,13 @@ def execute_schedule_command(
         return output, 0
     if args.schedule_action == "status":
         statuses = selected_manager.status()
-        success = all(item.installed and item.loaded for item in statuses)
-        output = _format_schedule_status(statuses, heading="Slack availability schedule")
+        health = selected_manager.health()
+        success = all(item.installed and item.loaded for item in statuses) and health.healthy
+        output = _format_schedule_status(
+            statuses,
+            heading="Slack availability schedule",
+            health=health,
+        )
         return output, 0 if success else 1
     if args.schedule_action == "uninstall":
         statuses = selected_manager.uninstall()
@@ -182,11 +191,23 @@ def _format_delay(seconds: float) -> str:
     return f"{seconds:g} {unit}"
 
 
-def _format_schedule_status(statuses: tuple[LaunchAgentStatus, ...], *, heading: str) -> str:
+def _format_schedule_status(
+    statuses: tuple[LaunchAgentStatus, ...],
+    *,
+    heading: str,
+    health: ScheduleHealth | None = None,
+) -> str:
     lines = [heading, "Timezone: Asia/Karachi"]
     for item in statuses:
         lines.append(
             f"{item.label}: installed={'yes' if item.installed else 'no'}, "
             f"loaded={'yes' if item.loaded else 'no'}, path={item.path}"
         )
+    if health is not None:
+        if health.interpreter is not None:
+            lines.append(
+                f"Interpreter: {health.interpreter} "
+                f"(runnable={'yes' if health.interpreter_can_run else 'no'})"
+            )
+        lines.extend(f"! {problem}" for problem in health.problems)
     return "\n".join(lines)

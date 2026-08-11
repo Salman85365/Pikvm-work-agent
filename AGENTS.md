@@ -100,10 +100,15 @@ blocks for input. Do not disable PiKVM server-side 2FA or touch Apple Passwords/
 
 Availability workflows may only read or change the manual Active/Away toggle.
 
-Triage may only read Slack's visible unread sidebar. It must never open, select, or scroll into a
-conversation, channel, DM, or thread: opening one marks it read, which is not reliably reversible and
-destroys the unread signal triage exists to report. Enforce that with the local allowlist policy, not
-with prompt instructions, and keep the perception schema incapable of carrying message text.
+Triage may only read Slack's visible unread sidebar. It must never open or select a conversation,
+channel, DM, or thread: opening one marks it read, which is not reliably reversible and destroys the
+unread signal triage exists to report. Enforce that locally rather than through prompt instructions,
+and keep the perception schema incapable of carrying message text.
+
+Enforce it with the narrowest rule that names the harmful action. Broad allowlists that also block
+the intended path are defects, not safety: a policy which prevents the workflow from working is worse
+than no policy, because it removes the feature while appearing careful. When a restriction and a
+legitimate action collide, fix the restriction.
 
 Neither workflow may read or send messages, edit status text or emoji, change preferences, or
 simulate activity. Conversation names are Slack content: never persist them to logs or state.

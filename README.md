@@ -373,19 +373,23 @@ the conversation sidebar: names, unread counts, mention badges, and muted state.
 separate phases — a bounded controller brings Slack to the foreground, then a plain screenshot is
 read with no executor attached, so the reading phase is structurally incapable of sending HID.
 
-That boundary is enforced by a local allowlist policy, not by asking the model nicely. Triage may
-click only an application launcher labelled exactly `Slack`, use `MetaLeft+Space`, type `slack` into
-a visible search field, and press Enter or Escape. Clicking a sidebar row, double-clicking, and
-scrolling are all denied, and the generic engine's stop conditions still apply first.
+The boundary is positional rather than a list of approved labels: input is permitted only while
+Slack is not yet the foreground application, and once Slack is in front there is nothing left to
+click. A target whose name begins with `#` is also refused, since that unambiguously names a channel.
+Everything else is ordinary navigation and is left to the generic policy engine, so a Dock icon with
+an unread badge still works.
 
 Because the sidebar carries no message text, triage reports *that* something is unread, never what it
 says. Ranking mentions above direct messages above channels is the most a non-destructive read
 supports; judging whether a message is a question, a blocker, or an approval request needs the
 conversation opened, which this workflow will not do.
 
+The dashboard's **Inbox & triage** panel shows the same results with full detail — conversation
+name, kind, unread count, mention badge, and why each entry ranked where it did.
+
 Counts only are recorded to `~/Library/Logs/pikvm-work-agent/slack-triage.jsonl` — the number of
-unread conversations, mentions, and direct messages. Conversation names are Slack content and are
-never written to disk.
+unread conversations, mentions, and direct messages. Conversation names are shown live in the
+terminal and the dashboard but never written to disk.
 
 ## Mac-local Slack availability schedule
 

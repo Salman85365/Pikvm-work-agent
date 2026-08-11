@@ -16,6 +16,7 @@ ALL_KVMS = "__all__"
 
 
 class JobKind(StrEnum):
+    TRIAGE = "triage"
     AVAILABILITY_GET = "availability_get"
     AVAILABILITY_SET = "availability_set"
     SCHEDULE_RUN_NOW = "schedule_run_now"
@@ -153,11 +154,16 @@ class JobSnapshot(_Model):
     summary: str | None
     error: str | None
     results: list[JobResultLine]
+    payload: dict[str, object] | None = None
 
 
 class AvailabilityRequest(_Model):
     kvm: str = Field(min_length=1, max_length=64)
     availability: Availability | None = None
+
+
+class TriageRequest(_Model):
+    kvm: str = Field(min_length=1, max_length=64)
 
 
 class ScheduleActionRequest(_Model):

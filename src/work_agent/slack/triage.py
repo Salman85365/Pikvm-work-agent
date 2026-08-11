@@ -35,15 +35,17 @@ TRIAGE_CONTEXT = (
 
 FOREGROUND_OBJECTIVE = """Make Slack the visible foreground application, then finish.
 
-Use the visible Slack icon in the macOS Dock or Windows taskbar, or deterministic OS application
-search if no icon is visible. Finish as soon as Slack's main window with its conversation sidebar is
-visible.
+Prefer the Slack icon in the macOS Dock or Windows taskbar. If no icon is visible, use deterministic
+OS application search. The icon may carry an unread badge; that is still the right target. Never
+click inside the Slack window itself to focus it, even when part of that window is already visible.
+
+Finish as soon as Slack's main window and its conversation sidebar are visible. If Slack is already
+foreground, finish immediately without any action.
 
 Do not open, select, or click any conversation, channel, direct message, or thread. Opening a
 conversation marks it read and destroys the unread state this workflow exists to report. Do not
 read, summarise, or act on any message. Do not send anything. Do not change availability, status
-text, emoji, or preferences. If Slack is already foreground with its sidebar visible, finish
-immediately without any action."""
+text, emoji, or preferences."""
 
 
 def classify(conversation_kind: ConversationKind, *, has_mention: bool) -> AttentionLevel:

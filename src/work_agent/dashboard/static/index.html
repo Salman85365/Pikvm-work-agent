@@ -62,9 +62,9 @@
         <span class="navitem__label">Availability</span>
         <span class="navitem__badge" title="Autonomy level 2 — local, reversible">L2</span>
       </button>
-      <button class="navitem is-planned" type="button" disabled data-planned="M6">
+      <button class="navitem" type="button" data-section="triage">
         <span class="navitem__label">Inbox &amp; triage</span>
-        <span class="navitem__milestone">M6</span>
+        <span class="navitem__badge" title="Autonomy level 0 — reads visible state only">L0</span>
       </button>
       <button class="navitem is-planned" type="button" disabled data-planned="M7">
         <span class="navitem__label">Reply drafting</span>
@@ -235,6 +235,30 @@
               <tbody id="avail-body"></tbody>
             </table>
           </div>
+        </section>
+      </div>
+    </div>
+
+    <!-- Slack triage -->
+    <div class="view" data-view="triage" hidden>
+      <div class="grid">
+        <section class="card card--span12" aria-labelledby="triage-title">
+          <div class="card__head">
+            <h2 id="triage-title" class="card__title">Slack inbox triage</h2>
+            <span class="card__hint">Autonomy L0 · reads the sidebar · never opens a conversation</span>
+          </div>
+          <p class="card__lede">
+            Reports what Slack already shows: unread channels and direct messages, their counts, and
+            mention badges. Conversations are never opened, so your unread state survives. Names are
+            shown here but never written to any log.
+          </p>
+          <div class="actions">
+            <button class="button button--primary" type="button" data-triage="__all__">
+              Check all environments
+            </button>
+            <span id="triage-per-kvm" class="actions"></span>
+          </div>
+          <div id="triage-body"></div>
         </section>
       </div>
     </div>

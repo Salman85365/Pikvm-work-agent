@@ -20,6 +20,8 @@ class JobOutcome:
     ok: bool
     summary: str
     results: tuple[JobResultLine, ...] = ()
+    # Skill-specific structured detail, rendered by the matching panel.
+    payload: dict[str, object] | None = None
 
 
 Work = Callable[[Emit], JobOutcome]
@@ -41,6 +43,7 @@ class _Job:
     error: str | None = None
     events: list[str] = field(default_factory=list)
     results: list[JobResultLine] = field(default_factory=list)
+    payload: dict[str, object] | None = None
 
 
 class JobManager:
@@ -112,6 +115,7 @@ class JobManager:
                 job.status = JobStatus.SUCCEEDED if outcome.ok else JobStatus.FAILED
                 job.summary = outcome.summary
                 job.results = list(outcome.results)
+                job.payload = outcome.payload
                 job.finished_at = datetime.now(UTC)
         finally:
             with self._lock:
@@ -135,6 +139,7 @@ class JobManager:
                 summary=job.summary,
                 error=job.error,
                 results=list(job.results),
+                payload=job.payload,
             )
 
     def events_since(self, job_id: str, index: int) -> tuple[list[str], JobStatus]:

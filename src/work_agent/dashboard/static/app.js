@@ -12,6 +12,7 @@ const state = {
   schedule: null,
   activityKvm: null,
   busy: new Set(),
+  triage: null,
   stream: null,
 };
 
@@ -535,6 +536,116 @@ function renderActivity() {
   for (const record of payload.records) body.append(historyRow(record));
 }
 
+/* ---------------- Slack triage ---------------- */
+
+const ATTENTION_LABEL = {
+  mentioned: "Mention",
+  direct: "Direct message",
+  unread: "Unread",
+};
+
+function renderTriageButtons() {
+  const holder = el("triage-per-kvm");
+  clear(holder);
+  for (const profile of state.kvms.filter((item) => item.configured)) {
+    const button = node("button", "button button--small", profile.name);
+    button.type = "button";
+    button.dataset.triage = profile.name;
+    button.disabled = state.busy.has(profile.name);
+    holder.append(button);
+  }
+}
+
+function renderTriage() {
+  const holder = el("triage-body");
+  clear(holder);
+  const payload = state.triage;
+  if (!payload) {
+    holder.append(
+      node("p", "empty", "No triage run yet. Reading the sidebar never opens a conversation."),
+    );
+    return;
+  }
+  for (const report of payload.reports) {
+    const card = node("section", "triagecard");
+    const head = node("div", "triagecard__head");
+    head.append(node("span", "triagecard__kvm", report.kvm));
+    if (!report.success) {
+      head.append(chip("failure", "✕", report.error || "triage unavailable"));
+      card.append(head);
+      holder.append(card);
+      continue;
+    }
+    const attention = report.items.filter((item) => item.attention !== "unread");
+    head.append(chip("warn", "!", `${attention.length} need attention`));
+    head.append(
+      node(
+        "span",
+        "triagecard__meta",
+        `${report.items.length} unread · confidence ${Math.round(report.confidence * 100)}%`,
+      ),
+    );
+    card.append(head);
+
+    if (!report.items.length) {
+      card.append(node("p", "triagecard__meta", "Nothing unread."));
+    } else {
+      const table = node("table", "table");
+      const thead = node("thead");
+      const headRow = node("tr");
+      for (const label of ["Conversation", "Kind", "Unread", "Why"]) {
+        const cell = node("th", null, label);
+        cell.scope = "col";
+        headRow.append(cell);
+      }
+      thead.append(headRow);
+      table.append(thead);
+      const body = node("tbody");
+      for (const item of report.items) {
+        const row = node("tr");
+        const name = node("td", "table__kvm");
+        if (item.has_mention) name.append(node("span", "triagecard__at", "@"));
+        name.append(node("span", null, item.name));
+        row.append(name);
+        row.append(node("td", null, item.kind.replace(/_/g, " ")));
+        row.append(node("td", null, item.unread_count || "—"));
+        row.append(node("td", "table__detail", ATTENTION_LABEL[item.attention] || item.attention));
+        body.append(row);
+      }
+      table.append(body);
+      const wrap = node("div", "tablewrap");
+      wrap.append(table);
+      card.append(wrap);
+    }
+    if (report.sidebar_truncated) {
+      card.append(
+        node(
+          "p",
+          "triagecard__meta",
+          "The sidebar was clipped, so more unread entries may exist below.",
+        ),
+      );
+    }
+    holder.append(card);
+  }
+}
+
+async function startTriage(kvm) {
+  const scope = kvm === ALL_KVMS ? "all environments" : kvm;
+  const targets =
+    kvm === ALL_KVMS ? state.kvms.filter((p) => p.configured).map((p) => p.name) : [kvm];
+  try {
+    const job = await api("/api/triage", {
+      method: "POST",
+      body: JSON.stringify({ kvm }),
+    }).then((response) => response.json());
+    follow(job, `Slack triage · ${scope}`, targets);
+  } catch (error) {
+    setDrawer("failed", `Slack triage · ${scope}`, error.message);
+    openDrawer();
+  }
+}
+
 /* ---------------- run drawer ---------------- */
 
 function setDrawer(status, title, meta) {
@@ -607,6 +718,7 @@ async function follow(job, label, targets) {
   openDrawer();
   renderFleet();
   renderAvailability();
+  renderTriageButtons();
 
   try {
     for await (const frame of sseFrames(`/api/jobs/${job.id}/events`, controller.signal)) {
@@ -614,6 +726,10 @@ async function follow(job, label, targets) {
         appendTrace(frame.data.text);
       } else if (frame.event === "done") {
         renderResults(frame.data.results || []);
+        if (frame.data.kind === "triage" && frame.data.payload) {
+          state.triage = frame.data.payload;
+          renderTriage();
+        }
         const ok = frame.data.status === "succeeded";
         setDrawer(
           ok ? "succeeded" : "failed",
@@ -749,6 +865,7 @@ async function refresh() {
     renderFleet();
     renderOverview();
     renderAvailability();
+    renderTriageButtons();
     renderActivity();
   } catch (error) {
     setDrawer("failed", "Could not load dashboard data", error.message);
@@ -817,7 +934,12 @@ async function boot() {
   // delegate rather than rebinding on every render.
   document.addEventListener("click", (event) => {
     const trigger = event.target.closest("[data-action][data-kvm]");
-    if (trigger && !trigger.disabled) startAvailability(trigger.dataset.action, trigger.dataset.kvm);
+    if (trigger && !trigger.disabled) {
+      startAvailability(trigger.dataset.action, trigger.dataset.kvm);
+      return;
+    }
+    const triage = event.target.closest("[data-triage]");
+    if (triage && !triage.disabled) startTriage(triage.dataset.triage);
   });
 
   for (const button of document.querySelectorAll("[data-schedule]")) {
@@ -851,6 +973,8 @@ async function boot() {
   }
   if (config.default_kvm) shotSelect.value = config.default_kvm;
 
+  renderTriageButtons();
+  renderTriage();
   showSection(storedSection);
   await refresh();
   setInterval(() => {

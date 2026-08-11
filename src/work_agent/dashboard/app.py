@@ -26,6 +26,7 @@ from work_agent.dashboard.models import (
     ScheduleAction,
     ScheduleActionRequest,
     ScheduleSnapshot,
+    TriageRequest,
 )
 from work_agent.pikvm import PiKVMError
 from work_agent.schedule.errors import ScheduleError
@@ -181,6 +182,37 @@ def create_app(*, token: str | None = None) -> FastAPI:
             target="all KVMs" if payload.kvm == ALL_KVMS else payload.kvm,
             keys=targets,
             work=operations.availability_work(targets, payload.availability),
+        )
+
+    @app.post("/api/triage", dependencies=guarded, status_code=202)
+    def start_triage(
+        request: Request,
+        payload: Annotated[TriageRequest, Body()],
+    ) -> JobSnapshot:
+        profiles = profile_names()
+        if not profiles:
+            raise HTTPException(
+                status_code=400,
+                detail="Slack triage requires at least one name in PIKVM_PROFILES.",
+            )
+        if payload.kvm == ALL_KVMS:
+            targets = tuple(profiles)
+        elif payload.kvm in profiles:
+            targets = (payload.kvm,)
+        else:
+            raise HTTPException(status_code=404, detail=f"Unknown PiKVM profile {payload.kvm!r}.")
+
+        try:
+            operations.ensure_runnable(targets)
+        except (PiKVMError, OSError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from None
+
+        return start_job(
+            request,
+            kind=JobKind.TRIAGE,
+            target="all KVMs" if payload.kvm == ALL_KVMS else payload.kvm,
+            keys=targets,
+            work=operations.triage_work(targets),
         )
 
     @app.post("/api/schedule/actions", dependencies=guarded, status_code=202)

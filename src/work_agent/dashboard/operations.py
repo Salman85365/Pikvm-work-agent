@@ -28,7 +28,10 @@ from work_agent.schedule.cli import execute_schedule_command
 from work_agent.schedule.launchd import LaunchAgentStatus, SlackAvailabilityLaunchdManager
 from work_agent.schedule.reconcile import KARACHI_TIMEZONE, desired_availability, next_transition
 from work_agent.schedule.state import ReconciliationStateStore
-from work_agent.slack.cli import default_slack_availability_service
+from work_agent.slack.cli import (
+    default_slack_availability_service,
+    default_slack_triage_service,
+)
 from work_agent.slack.models import Availability, AvailabilityResult
 
 _LABEL_PREFIX = "com.pikvm-work-agent.slack-availability."
@@ -148,6 +151,61 @@ def availability_work(
         succeeded = sum(1 for item in batch.results if item.success)
         summary = f"{verb} {succeeded} of {len(batch.results)} KVM(s)."
         return JobOutcome(ok=batch.success, summary=summary, results=results)
+
+    return run
+
+
+def triage_work(targets: tuple[str, ...]) -> Callable[[Emit], JobOutcome]:
+    """Read visible Slack unread state. Conversation names reach the browser but never disk."""
+
+    def run(emit: Emit) -> JobOutcome:
+        service = default_slack_triage_service(trace_output=emit)
+        batch = service.run(targets)
+        results = tuple(
+            JobResultLine(
+                kvm=report.kvm,
+                ok=report.success,
+                text=(
+                    f"{len(report.needs_attention)} need attention, {len(report.informational)} FYI"
+                    if report.success
+                    else (report.error or "triage unavailable")
+                ),
+            )
+            for report in batch.reports
+        )
+        for report in batch.reports:
+            if report.log_error is not None:
+                emit(f"{report.kvm}  ! {report.log_error}")
+        payload: dict[str, object] = {
+            "reports": [
+                {
+                    "kvm": report.kvm,
+                    "success": report.success,
+                    "error": report.error,
+                    "sidebar_truncated": report.sidebar_truncated,
+                    "confidence": report.confidence,
+                    "total_unread_badge": report.total_unread_badge,
+                    "items": [
+                        {
+                            "name": item.name,
+                            "kind": item.kind.value,
+                            "unread_count": item.unread_count,
+                            "has_mention": item.has_mention,
+                            "attention": item.attention.value,
+                        }
+                        for item in report.items
+                    ],
+                }
+                for report in batch.reports
+            ]
+        }
+        attention = sum(len(report.needs_attention) for report in batch.reports)
+        return JobOutcome(
+            ok=batch.success,
+            summary=f"{attention} conversation(s) need attention across {len(targets)} KVM(s).",
+            results=results,
+            payload=payload,
+        )
 
     return run
 

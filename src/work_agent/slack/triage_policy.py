@@ -3,105 +3,79 @@ from __future__ import annotations
 from work_agent.agent.models import (
     ActionProposal,
     ClickElementAction,
-    FinishAction,
-    HotkeyAction,
-    MoveMouseAction,
+    DoubleClickElementAction,
     PolicyDecision,
     PolicyDecisionKind,
-    PressKeyAction,
-    RequestUserAction,
     RiskCategory,
-    TextPurpose,
-    TypeTextAction,
-    WaitAction,
+    is_hid_action,
 )
 from work_agent.agent.policy import PolicyEngine
-from work_agent.vision import ScreenAnalysis, UIElement, UIElementRole
-
-# Only an application launcher, never a conversation. Matched exactly: a sidebar entry named
-# "Slack" would otherwise be indistinguishable from the Dock icon.
-_LAUNCHER_LABELS = frozenset({"slack", "slack app", "slack application"})
-_LAUNCHER_ROLES = frozenset({UIElementRole.ICON, UIElementRole.BUTTON, UIElementRole.LIST_ITEM})
-_ALLOWED_KEYS = frozenset({"Enter", "Escape"})
+from work_agent.vision import ScreenAnalysis, UIElement
 
 
 class SlackTriagePolicyEngine(PolicyEngine):
-    """Allowlist-only policy: triage may bring Slack forward and nothing else.
+    """Keep triage from opening a conversation, without second-guessing ordinary navigation.
 
-    Opening a conversation marks it read, which cannot be reliably undone and destroys the
-    unread state triage exists to report. That boundary is enforced here rather than requested
-    in the prompt, because model output is untrusted input.
+    The rule is positional rather than label-based: input is permitted only while Slack is not
+    yet the foreground application, and once Slack is in front there is nothing left to click.
+    Matching launcher labels was tried and rejected - a Dock icon routinely carries an unread
+    badge, so requiring an exact "Slack" label with no other visible text denied the very click
+    that brings Slack forward.
+
+    A leading "#" is still refused, because that unambiguously names a channel and no launcher
+    looks like one. Everything else defers to the generic engine.
     """
 
     def evaluate(self, proposal: ActionProposal, screen: ScreenAnalysis) -> PolicyDecision:
+        decision = super().evaluate(proposal, screen)
         action = proposal.action
-        base = super().evaluate(proposal, screen)
+        if not is_hid_action(action):
+            return decision
+        if decision.decision is PolicyDecisionKind.DENY:
+            return decision
 
-        if isinstance(action, (FinishAction, RequestUserAction, WaitAction)):
-            return base
-        # A conservative stop from the generic engine is never overridden.
-        if base.decision is PolicyDecisionKind.DENY:
-            return base
-
-        if not self._is_foregrounding_action(action, screen):
+        if _slack_is_foreground(screen):
             return PolicyDecision(
                 decision=PolicyDecisionKind.DENY,
                 reason=(
-                    "Slack triage may only bring Slack to the foreground. Opening or selecting a "
+                    "Slack is already in front, so triage has nothing left to click. Selecting a "
                     "conversation would mark it read."
                 ),
                 inferred_risk=RiskCategory.LOCAL_EDIT,
             )
-        if base.decision is PolicyDecisionKind.ALLOW:
-            return base
 
+        if isinstance(action, (ClickElementAction, DoubleClickElementAction)):
+            element = _visible_element(action.element_id, screen)
+            if element is not None and element.label.strip().startswith("#"):
+                return PolicyDecision(
+                    decision=PolicyDecisionKind.DENY,
+                    reason="That target names a Slack channel; opening it would mark it read.",
+                    inferred_risk=RiskCategory.LOCAL_EDIT,
+                )
+
+        if decision.decision is not PolicyDecisionKind.REQUIRE_APPROVAL:
+            return decision
+
+        # Same relaxation the availability workflow uses: opening an application is navigation.
         navigation = proposal.model_copy(update={"risk": RiskCategory.NAVIGATION})
         reconsidered = super().evaluate(navigation, screen)
         if reconsidered.decision is not PolicyDecisionKind.ALLOW:
-            return base
+            return decision
         return PolicyDecision(
             decision=PolicyDecisionKind.ALLOW,
-            reason="The action only brings Slack to the foreground.",
+            reason="Bringing Slack to the foreground is ordinary navigation.",
             inferred_risk=RiskCategory.NAVIGATION,
         )
 
-    @classmethod
-    def _is_foregrounding_action(cls, action: object, screen: ScreenAnalysis) -> bool:
-        if isinstance(action, MoveMouseAction):
-            return True
-        if isinstance(action, PressKeyAction):
-            return action.key in _ALLOWED_KEYS
-        if isinstance(action, HotkeyAction):
-            return tuple(action.keys) == ("MetaLeft", "Space")
-        if isinstance(action, TypeTextAction):
-            return (
-                action.purpose is TextPurpose.NAVIGATION_SEARCH
-                and action.text.strip().casefold() == "slack"
-            )
-        if isinstance(action, ClickElementAction):
-            element = cls._visible_element(action.element_id, screen)
-            return element is not None and cls._is_launcher(element)
-        # Double-click, scroll, and anything else are outside the workflow's needs.
-        return False
 
-    @staticmethod
-    def _visible_element(element_id: str, screen: ScreenAnalysis) -> UIElement | None:
-        if screen.target is not None and screen.target.id == element_id:
-            return screen.target
-        return next(
-            (element for element in screen.relevant_elements if element.id == element_id),
-            None,
-        )
+def _slack_is_foreground(screen: ScreenAnalysis) -> bool:
+    return "slack" in screen.application.casefold()
 
-    @staticmethod
-    def _is_launcher(element: UIElement) -> bool:
-        if element.click_point is None or element.confidence < 0.8:
-            return False
-        if element.role not in _LAUNCHER_ROLES:
-            return False
-        label = element.label.strip().casefold()
-        visible = element.visible_text.strip().casefold()
-        if label not in _LAUNCHER_LABELS:
-            return False
-        # A sidebar row usually carries extra visible text (a badge, a preview, a channel hash).
-        return visible in _LAUNCHER_LABELS or not visible
+
+def _visible_element(element_id: str, screen: ScreenAnalysis) -> UIElement | None:
+    if screen.target is not None and screen.target.id == element_id:
+        return screen.target
+    return next(
+        (element for element in screen.relevant_elements if element.id == element_id),
+        None,
+    )

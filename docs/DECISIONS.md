@@ -173,11 +173,16 @@ exists to report — worst of all in an unattended scheduled run. Milestone 6 th
 Slack already displays: sidebar conversation names, unread counts, mention badges, and muted state.
 
 The boundary is enforced locally, not requested in the prompt, because model output is untrusted
-input. `SlackTriagePolicyEngine` is an allowlist: an application launcher labelled exactly `Slack`,
-`MetaLeft+Space`, the literal navigation search text `slack`, and Enter or Escape. Clicking a sidebar
-row, double-clicking, and scrolling are denied, and a conservative stop from the generic engine is
-never overridden. The exact-label match matters: a sidebar entry named `Slack` would otherwise be
-indistinguishable from the Dock icon, so a launcher must additionally carry no extra visible text.
+input. It is positional: `SlackTriagePolicyEngine` permits input only while Slack is not yet the
+foreground application, so once Slack is in front every conversation is out of reach by construction.
+A target whose name begins with `#` is additionally refused. Everything else defers to the generic
+engine.
+
+A launcher-label allowlist was tried first and rejected. Requiring an exact `Slack` label with no
+other visible text denied the very click that brings Slack forward, because a Dock icon routinely
+carries an unread badge — the workflow would have failed at its first step on real hardware. A policy
+that blocks the intended path is not a safe policy; it is a broken one. Prefer the narrowest rule
+that actually names the harmful action.
 
 Foregrounding and reading are separate phases. The bounded controller brings Slack forward; the read
 then runs on a plain screenshot with no executor attached, so it cannot send HID at all rather than

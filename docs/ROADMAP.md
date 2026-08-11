@@ -148,8 +148,8 @@ Implemented:
 - `slack triage --kvm NAME` and `--all-kvms`, reading Slack's visible unread sidebar;
 - a dedicated strict perception schema with no field capable of holding message text, read through a
   new reusable `OpenAIScreenAnalyzer.perceive` entry point;
-- an allowlist policy that denies opening, double-clicking, or scrolling a conversation, so the
-  non-destructive guarantee is enforced locally rather than requested in the prompt;
+- a positional policy that permits input only until Slack is foreground, so conversations are out of
+  reach by construction without brittle label matching that would block a badged Dock icon;
 - separate foregrounding and reading phases, the reading phase having no executor attached;
 - mention / direct-message / other-unread ranking, muted entries dropped, clipped-sidebar reporting;
 - counts-only JSONL logging that never records conversation names.

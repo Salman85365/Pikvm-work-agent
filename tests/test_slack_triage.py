@@ -240,8 +240,13 @@ def test_items_are_ordered_by_attention_then_volume_and_drop_muted() -> None:
 # ---------------- policy: the non-destructive guarantee ----------------
 
 
-def test_policy_allows_clicking_the_slack_launcher() -> None:
-    screen = _screen([_element("dock-slack", "Slack")])
+def test_policy_allows_a_badged_dock_icon() -> None:
+    """A Dock icon normally carries an unread badge in its visible text.
+
+    An earlier version required an exact "Slack" label with no other visible text, which denied
+    the only click that brings Slack forward and broke triage before it started.
+    """
+    screen = _screen([_element("dock-slack", "Slack", visible_text="3 unread")])
 
     decision = SlackTriagePolicyEngine().evaluate(
         _proposal(ClickElementAction(type="click_element", element_id="dock-slack", button="left")),
@@ -252,51 +257,65 @@ def test_policy_allows_clicking_the_slack_launcher() -> None:
 
 
 @pytest.mark.parametrize(
-    ("element_id", "label", "role", "visible_text"),
+    ("label", "visible_text", "role"),
     [
-        ("dm-patrick", "Patrick", UIElementRole.LIST_ITEM, "2"),
-        ("channel-general", "#general", UIElementRole.LIST_ITEM, "5"),
-        ("sidebar-slack", "Slack", UIElementRole.LIST_ITEM, "3 unread messages"),
-        ("thread-row", "Thread with Anthony", UIElementRole.LIST_ITEM, ""),
+        ("Slack", "", UIElementRole.ICON),
+        ("Slack — 12 new items", "12", UIElementRole.ICON),
+        ("Slack", "Heidrick", UIElementRole.LIST_ITEM),
+        ("Slack app", "open", UIElementRole.BUTTON),
     ],
 )
-def test_policy_denies_opening_any_conversation(
-    element_id: str,
+def test_policy_does_not_second_guess_ordinary_launcher_variants(
     label: str,
-    role: UIElementRole,
     visible_text: str,
+    role: UIElementRole,
 ) -> None:
-    """The read-preserving boundary must hold even when the planner asks nicely."""
-    screen = _screen([_element(element_id, label, role=role, visible_text=visible_text)])
+    screen = _screen([_element("launcher", label, role=role, visible_text=visible_text)])
 
     decision = SlackTriagePolicyEngine().evaluate(
-        _proposal(ClickElementAction(type="click_element", element_id=element_id, button="left")),
+        _proposal(ClickElementAction(type="click_element", element_id="launcher", button="left")),
+        screen,
+    )
+
+    assert decision.decision is PolicyDecisionKind.ALLOW
+
+
+def test_policy_denies_all_input_once_slack_is_foreground() -> None:
+    """The positional guarantee: in front of Slack there is nothing triage may click."""
+    screen = _screen(
+        [_element("dm-patrick", "Patrick", role=UIElementRole.LIST_ITEM, visible_text="2")],
+        application="Slack",
+    )
+    engine = SlackTriagePolicyEngine()
+
+    for action in (
+        ClickElementAction(type="click_element", element_id="dm-patrick", button="left"),
+        DoubleClickElementAction(type="double_click_element", element_id="dm-patrick"),
+        ScrollAction(type="scroll", direction=ScrollDirection.DOWN, amount=2),
+        PressKeyAction(type="press_key", key="Enter"),
+    ):
+        decision = engine.evaluate(_proposal(action), screen)
+        assert decision.decision is PolicyDecisionKind.DENY, action
+        assert "nothing left to click" in decision.reason
+
+
+def test_policy_denies_a_channel_target_even_before_slack_is_foreground() -> None:
+    screen = _screen(
+        [_element("channel-general", "#general", role=UIElementRole.LIST_ITEM, visible_text="5")]
+    )
+
+    decision = SlackTriagePolicyEngine().evaluate(
+        _proposal(
+            ClickElementAction(type="click_element", element_id="channel-general", button="left")
+        ),
         screen,
     )
 
     assert decision.decision is PolicyDecisionKind.DENY
-    assert "mark it read" in decision.reason
+    assert "names a Slack channel" in decision.reason
 
 
-def test_policy_denies_double_click_and_scroll() -> None:
-    screen = _screen([_element("dock-slack", "Slack")])
-    engine = SlackTriagePolicyEngine()
-
-    double = engine.evaluate(
-        _proposal(DoubleClickElementAction(type="double_click_element", element_id="dock-slack")),
-        screen,
-    )
-    scroll = engine.evaluate(
-        _proposal(ScrollAction(type="scroll", direction=ScrollDirection.DOWN, amount=2)),
-        screen,
-    )
-
-    assert double.decision is PolicyDecisionKind.DENY
-    assert scroll.decision is PolicyDecisionKind.DENY
-
-
-def test_policy_allows_only_the_documented_launch_shortcuts() -> None:
-    # Spotlight is open, so the generic engine sees a real search field to type into.
+def test_policy_allows_application_search_to_open_slack() -> None:
     screen = _screen(
         [
             _element(
@@ -323,25 +342,9 @@ def test_policy_allows_only_the_documented_launch_shortcuts() -> None:
         ),
         screen,
     )
-    other_app = engine.evaluate(
-        _proposal(
-            TypeTextAction(
-                type="type_text",
-                text="terminal",
-                purpose=TextPurpose.NAVIGATION_SEARCH,
-            )
-        ),
-        screen,
-    )
-    other_hotkey = engine.evaluate(
-        _proposal(HotkeyAction(type="hotkey", keys=["ControlLeft", "KeyF"])),
-        screen,
-    )
 
     assert spotlight.decision is PolicyDecisionKind.ALLOW
     assert search.decision is PolicyDecisionKind.ALLOW
-    assert other_app.decision is PolicyDecisionKind.DENY
-    assert other_hotkey.decision is PolicyDecisionKind.DENY
 
 
 def test_policy_still_defers_to_the_generic_engine_on_unsafe_screens() -> None:

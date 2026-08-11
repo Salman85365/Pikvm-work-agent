@@ -597,3 +597,17 @@ h1, h2, h3 { margin: 0; font-weight: 600; letter-spacing: -0.01em; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition-duration: 0ms !important; animation-duration: 0ms !important; }
 }
+
+/* ---------- triage ---------- */
+
+.triagecard {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 14px 15px;
+  margin-top: 13px;
+  display: grid; gap: 10px;
+}
+.triagecard__head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.triagecard__kvm { font-size: 13.5px; font-weight: 600; }
+.triagecard__meta { margin: 0; font-size: 11.5px; color: var(--text-muted); }
+.triagecard__at { color: var(--series-1); font-weight: 700; margin-right: 5px; }

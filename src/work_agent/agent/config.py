@@ -58,6 +58,9 @@ class AgentSettings:
     screen_change_timeout_seconds: float = 5.0
     screen_stable_frames: int = 2
     screen_stable_threshold: float = 0.015
+    # Fraction of 64x36 compare cells that must move for a small popover to count as a
+    # change; ~9 cells. Slack's profile menu does not shift the whole-screen mean enough.
+    screen_localized_change_threshold: float = 0.004
     stale_screen_threshold: float = 0.06
 
     def __post_init__(self) -> None:
@@ -104,6 +107,10 @@ class AgentSettings:
             raise AgentConfigurationError("AGENT_SCREEN_STABLE_FRAMES must be between 1 and 5.")
         for name, value in (
             ("AGENT_SCREEN_STABLE_THRESHOLD", self.screen_stable_threshold),
+            (
+                "AGENT_SCREEN_LOCALIZED_CHANGE_THRESHOLD",
+                self.screen_localized_change_threshold,
+            ),
             ("AGENT_STALE_SCREEN_THRESHOLD", self.stale_screen_threshold),
         ):
             if not 0.0 < value <= 1.0:
@@ -148,5 +155,8 @@ class AgentSettings:
             screen_change_timeout_seconds=_env_float("AGENT_SCREEN_CHANGE_TIMEOUT_SECONDS", 5.0),
             screen_stable_frames=_env_int("AGENT_SCREEN_STABLE_FRAMES", 2),
             screen_stable_threshold=_env_float("AGENT_SCREEN_STABLE_THRESHOLD", 0.015),
+            screen_localized_change_threshold=_env_float(
+                "AGENT_SCREEN_LOCALIZED_CHANGE_THRESHOLD", 0.004
+            ),
             stale_screen_threshold=_env_float("AGENT_STALE_SCREEN_THRESHOLD", 0.06),
         )

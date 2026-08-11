@@ -534,6 +534,7 @@ class AgentController:
                     f"Screen settle: changed={'yes' if settled.changed else 'no'}, "
                     f"stable={'yes' if settled.stable else 'no'}, "
                     f"difference={settled.difference:.4f}, "
+                    f"changed_cells={settled.changed_fraction:.4f}, "
                     f"timed_out={'yes' if settled.timed_out else 'no'}"
                 )
                 if settled.changed:

@@ -163,6 +163,27 @@ a separate health check probes what the *already installed* agents would run. `s
 result and exits non-zero when scheduled runs cannot work, so a loaded job is never mistaken for a
 working one.
 
+## Two-signal screen-change detection
+
+Status: accepted and implemented.
+
+Local screen comparison downscales to a 64x36 greyscale grid. The whole-screen mean is the right
+signal for the stale-plan guard, because it must not cancel a valid plan over cursor blink or video
+noise. It is the wrong signal for "did anything happen", and a real `nbc_kvm` trace proved it: a
+click that visibly opened Slack's profile menu measured 0.0046 — below the 0.015 change threshold —
+so the detector reported `changed=no` and burned its full five-second timeout on a screen that had
+already settled. The menu covers roughly 6% of the screen at about 26 grey levels of contrast, which
+a whole-screen average cannot see.
+
+Settle detection therefore also computes the fraction of grid cells that moved at least 10 grey
+levels, and treats either signal as a change. Unchanged real frames measured 0.0001 mean, so the
+per-cell floor sits far above sensor noise while staying far below a real popover. The stale-plan
+guard deliberately keeps using the mean alone.
+
+This matters beyond wasted time: `AGENT_MAX_NO_CHANGE_STEPS` counts consecutive unchanged steps, so a
+workflow that opens a menu, clicks a toggle, and reopens the menu to verify could otherwise be
+stopped as stuck on changes that genuinely happened.
+
 ## Structured controller stop codes
 
 Status: accepted and implemented.

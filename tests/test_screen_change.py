@@ -10,6 +10,7 @@ from work_agent.agent.screen_change import (
     GuardStatus,
     PreActionGuard,
     ScreenSettleDetector,
+    changed_fraction,
     difference,
     signature,
 )
@@ -158,3 +159,99 @@ def test_settle_detector_times_out_when_screen_never_changes() -> None:
     assert result.stable is False
     assert result.timed_out is True
     assert result.polls == 3
+
+
+def _popover_screenshot(*, size: tuple[int, int] = (1920, 1080)) -> Screenshot:
+    """A dark desktop with a small, low-contrast panel.
+
+    Sized and toned to reproduce the real nbc_kvm measurement: Slack's profile menu covers
+    roughly 6% of a 1920x1080 screen and differs from its surroundings by only ~26 grey
+    levels, which is why the whole-screen mean read 0.0046.
+    """
+    image = Image.new("RGB", size, "#202020")
+    panel = Image.new("RGB", (300, 400), "#3a3a3a")
+    image.paste(panel, (40, 560))
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return Screenshot(
+        content=buffer.getvalue(),
+        size=ScreenSize(*size),
+        captured_at=datetime.now(UTC),
+        media_type="image/png",
+    )
+
+
+def test_a_small_popover_is_invisible_to_the_whole_screen_mean() -> None:
+    """Regression for the real nbc_kvm trace: the profile menu opened, but the settle
+    detector reported changed=no with difference=0.0046 and burned the full timeout."""
+    before = signature(_screenshot("#202020", size=(1920, 1080)).content)
+    after = signature(_popover_screenshot().content)
+
+    mean_change = difference(before, after)
+    localized = changed_fraction(before, after)
+
+    # The whole-screen mean stays under the 0.015 stable threshold, as observed on hardware.
+    assert mean_change < 0.015
+    # The localized signal clears the 0.004 threshold, so the change is still detected.
+    assert localized >= 0.004
+
+
+def test_settle_detects_a_small_popover_and_returns_before_the_timeout() -> None:
+    frames = [_popover_screenshot(), _popover_screenshot(), _popover_screenshot()]
+    ticks = iter(range(0, 400))
+    detector = ScreenSettleDetector(
+        poll_interval_seconds=0.1,
+        timeout_seconds=5.0,
+        stable_frames=2,
+        stable_threshold=0.015,
+        localized_change_threshold=0.004,
+        sleeper=lambda _: None,
+        clock=lambda: next(ticks) * 0.1,
+    )
+
+    result = detector.wait_for_settle(
+        lambda: frames.pop(0),
+        before=_screenshot("#202020", size=(1920, 1080)),
+    )
+
+    assert result.changed is True
+    assert result.stable is True
+    assert result.timed_out is False
+    assert result.changed_fraction >= 0.004
+    assert result.difference < 0.015
+
+
+def test_settle_still_reports_no_change_when_nothing_moved() -> None:
+    ticks = iter(range(0, 400))
+    detector = ScreenSettleDetector(
+        poll_interval_seconds=0.1,
+        timeout_seconds=1.0,
+        stable_frames=2,
+        stable_threshold=0.015,
+        localized_change_threshold=0.004,
+        sleeper=lambda _: None,
+        clock=lambda: next(ticks) * 0.1,
+    )
+
+    result = detector.wait_for_settle(
+        lambda: _screenshot("#202020", size=(1920, 1080)),
+        before=_screenshot("#202020", size=(1920, 1080)),
+    )
+
+    assert result.changed is False
+    assert result.changed_fraction == 0.0
+
+
+def test_localized_signal_does_not_loosen_the_stale_plan_guard() -> None:
+    """The stale guard must stay on the insensitive whole-screen mean, or a popover
+    opening between planning and acting would cancel every valid plan."""
+    guard = PreActionGuard(material_change_threshold=0.06)
+
+    result = guard.check(
+        planned=_screenshot("#202020", size=(1920, 1080)),
+        current=_popover_screenshot(),
+        action=PressKeyAction(type="press_key", key="Escape"),
+        screen=_analysis(width=1920, height=1080),
+    )
+
+    assert result.status is GuardStatus.ALLOW

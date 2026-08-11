@@ -183,6 +183,7 @@ def execute_agent_command(
                 timeout_seconds=agent_settings.screen_change_timeout_seconds,
                 stable_frames=agent_settings.screen_stable_frames,
                 stable_threshold=agent_settings.screen_stable_threshold,
+                localized_change_threshold=(agent_settings.screen_localized_change_threshold),
             ),
             approval_provider=approval_provider or TerminalApprovalProvider(output=output),
             settings=agent_settings,

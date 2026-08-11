@@ -96,6 +96,22 @@ The existing hidden terminal prompt remains available only through the explicit 
 provider or configured fallback. Fallback defaults to false so unattended operation never silently
 blocks for input. Do not disable PiKVM server-side 2FA or touch Apple Passwords/authenticator data.
 
+## Local dashboard
+
+A Mac-local dashboard (`pikvm-agent dashboard`) presents the existing workflows in a browser. It is a
+view and a trigger only: it must reuse the existing services, controller, policy, and verification
+rather than adding a second automation path, and it must never gain authority the CLI does not have.
+
+Because it can start real HID workflows, keep these boundaries: bind loopback only, refuse
+non-loopback `Host` headers, require the per-session token on every API request, never put that token
+or any secret in a URL, and never send passwords, TOTP seeds, generated codes, or API keys to the
+browser. Run one workflow per KVM at a time. Use the noninteractive approval provider so an
+unexpected approval requirement stops safely. Reject profiles configured for interactive TOTP entry
+before starting work, because a server must never block on a hidden terminal prompt. Live screenshots
+are streamed with `no-store` and never written to disk.
+
+Nothing about the dashboard changes the agentless-remote constraint.
+
 ## Security and credentials
 
 Never commit:

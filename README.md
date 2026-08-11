@@ -370,10 +370,77 @@ pikvm-agent schedule slack-availability uninstall
 
 The files live under `~/Library/LaunchAgents/`; no root access or remote-machine scheduler is used.
 Because launchd calendar triggers use the Mac's system time zone, installation requires the Mac
-system time zone to be `Asia/Karachi`. The jobs use the active virtual environment's Python and the
-current repository as their working directory, so keep both paths available after installation.
+system time zone to be `Asia/Karachi`. The jobs record an absolute interpreter path and the current
+repository as their working directory, so keep both paths available after installation.
 Local state is stored at
 `~/Library/Application Support/pikvm-work-agent/slack-availability-state.json`.
+
+Install writes a plist only after confirming that the recorded interpreter can import `work_agent`
+from the recorded working directory. Run it with the interpreter that has the project installed:
+
+```bash
+.venv/bin/python -m work_agent schedule slack-availability install
+```
+
+Installing with a bare `python3` records that interpreter instead, and every scheduled run then
+fails with `No module named work_agent` while `launchctl` still reports the job as loaded. `status`
+therefore reports the recorded interpreter, probes it, and exits non-zero when scheduled runs cannot
+actually work.
+
+## Local operations dashboard
+
+Serve a read-and-run console for the existing workflows on loopback only:
+
+```bash
+pikvm-agent dashboard
+```
+
+It binds `127.0.0.1:8787`, prints the URL, and opens a browser tab. `--host` accepts only a loopback
+address, `--port` accepts 1024 through 65535, and `--no-browser` suppresses the automatic tab.
+
+The layout follows `docs/ROADMAP_UPDATED_LONGTERM.md`: skills are navigable in a sidebar grouped as
+Slack, Development, Work, and System, with planned milestones listed but disabled so later skills
+have a place to land. Live skills carry their autonomy level from §10 of that roadmap.
+
+A **fleet rail** sits above every section and stays visible: one card per configured KVM showing its
+last observed availability, whether that matches what the schedule requires now, its verified-run
+ratio, and its own Check / Active / Away buttons. Multi-KVM work is the normal case, so every
+environment is visible and actionable at once rather than behind a selector.
+
+Sections:
+
+- **Overview** — reliability counts (workflows completed, states changed, already-correct no-ops,
+  read-only checks), stop reasons grouped into the roadmap's GUI-reliability categories, and the
+  most recent runs.
+- **Slack › Availability** — all-environment actions plus a per-environment table of observed state,
+  required state, last verified state, and actions.
+- **Schedule** — real health, state required now, next Asia/Karachi transition, the active window,
+  the recorded interpreter, per-agent installed/loaded state, and reconcile / run-now / reinstall /
+  remove controls.
+- **Activity** — sanitized stop reasons and the full run history, filterable per KVM.
+- **Remote screen** — one live PiKVM frame for a chosen KVM.
+
+Long-running work streams into a **run drawer** docked at the bottom, so the sanitized controller
+trace stays visible no matter which section you launched it from. Charts each have a table view.
+
+The dashboard is a local view over the same code paths as the CLI. It adds no new automation
+authority: runs go through the same bounded controller, the same local policy, and the same visible
+verification, and it uses the noninteractive approval provider, so an unexpected approval requirement
+stops that KVM instead of waiting. It cannot read or send Slack messages, edit status text or emoji,
+or act on raw coordinates.
+
+Safety properties worth knowing:
+
+- non-loopback `Host` headers are refused, so DNS rebinding cannot drive HID from another page;
+- every API request requires a per-session token that is generated at startup and embedded in the
+  served page, never placed in a URL;
+- one workflow at a time per KVM; a second request for a busy KVM is refused rather than queued;
+- passwords, TOTP seeds, generated codes, and API keys are never sent to the browser;
+- a profile configured for interactive TOTP entry is rejected before a run starts, because a server
+  must never block on a terminal prompt;
+- screenshots are streamed with `no-store` and never written to disk.
+
+Captured frames show real work-computer content in a browser tab. Close the tab when finished.
 
 ## Milestone 5 manual validation
 

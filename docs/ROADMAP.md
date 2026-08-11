@@ -10,6 +10,7 @@
 | M4 | Observe, act, and verify controller | Complete, hardware/API verified |
 | M4.5 | Automatic PiKVM TOTP from macOS Keychain | Complete, hardware verified |
 | M5 | Slack manual availability skill and scheduling | Implemented; real multi-KVM validation pending |
+| M5.5 | Local operations dashboard | Implemented; automated checks pass |
 | M6 | Slack reading and summarization | Planned |
 | M7 | Development-tool skills | Planned |
 | M8 | Higher-level work agent | Planned |
@@ -117,6 +118,28 @@ Implemented:
 Before marking M5 complete, validate get, both transitions, no-op behavior, all-KVM sequential
 execution, reconciliation, and installed LaunchAgent status on the real environment. Do not begin
 Slack message reading or sending.
+
+## Milestone 5.5: Local operations dashboard — implementation complete
+
+Implemented:
+
+- loopback-only FastAPI/uvicorn dashboard served by `pikvm-agent dashboard`;
+- per-KVM scoping for every panel, plus an all-KVM option for availability runs;
+- Slack availability get/set through the existing service, controller, and policy, with live
+  Server-Sent-Events trace streaming from a background worker thread;
+- schedule health, required state, next Asia/Karachi transition, per-agent installed/loaded state,
+  last verified state, and reconcile/run-now/reinstall/remove controls;
+- on-demand live PiKVM frame per KVM, streamed with `no-store` and never saved;
+- reliability, per-KVM success-rate meters, and sanitized stop-reason bars from the JSONL log, each
+  with an accessible table view and a light/dark validated palette;
+- per-session token on every API request, non-loopback `Host` refusal, per-KVM single-flight, and
+  rejection of profiles that would need a terminal TOTP prompt;
+- launchd install-time interpreter validation plus an honest health probe of already-installed
+  agents, so a loaded-but-broken schedule is reported rather than hidden.
+
+Automated tests, `ruff`, `ruff format`, and `mypy --strict` pass. The read-only panels and the live
+screenshot path were exercised against the real local environment. Driving a real Slack transition
+from the dashboard is left to the user, since it sends HID to a work computer.
 
 ## Later workflow milestones
 

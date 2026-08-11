@@ -155,3 +155,46 @@ retry round. Only failed profiles are retried, and verified successes are persis
 round. This does not retry individual HID requests: each later attempt creates a fresh bounded,
 idempotent controller session that observes current Slack state before deciding whether any action
 is still required. Interactive Slack CLI operations remain single-attempt.
+
+Because a plist records an absolute interpreter path, installing from the wrong shell produced agents
+that launchd reported as loaded while every run died with `No module named work_agent`. Install now
+probes the recorded interpreter against the recorded working directory before writing any plist, and
+a separate health check probes what the *already installed* agents would run. `status` surfaces that
+result and exits non-zero when scheduled runs cannot work, so a loaded job is never mistaken for a
+working one.
+
+## Local operations dashboard
+
+Status: accepted and implemented.
+
+A Mac-local FastAPI/uvicorn dashboard presents the existing workflows in a browser. It is a view and
+a trigger, not a new authority: availability runs call the same `SlackAvailabilityService`, the same
+bounded controller, the same local policy, and the same visible verification as the CLI, with the
+noninteractive approval provider so an unexpected approval requirement stops that KVM. Nothing is
+added to the remote computer, and the agentless constraint is unaffected.
+
+The dashboard can start real HID workflows, so it is deliberately confined. It binds only a loopback
+address; a non-loopback `Host` header is refused so DNS rebinding cannot reach it from another page.
+Every API request carries a per-session token generated at startup and embedded in the served page,
+never a URL parameter. Blocking workflows run in background threads and stream sanitized trace lines
+over Server-Sent Events read through `fetch`, since `EventSource` cannot send the token header. One
+workflow runs per KVM at a time; a request for a busy KVM is refused rather than queued. Profiles
+configured for interactive TOTP entry are rejected before a run starts, because a server must never
+block on a hidden terminal prompt. Passwords, TOTP seeds, generated codes, and API keys never reach
+the browser, and live screenshots are streamed with `no-store` and never written to disk.
+
+Charts follow the project's read-only-observability principle: they aggregate only the sanitized
+JSONL operation log and the local reconciliation state. Success rate is shown as a same-ramp meter
+and stop reasons as single-hue bars, because status green-versus-red fails colour-vision separation;
+every outcome is therefore carried by an icon and a label as well as colour, and each chart has a
+table view. Stop reasons are additionally grouped into the long-term roadmap's GUI-reliability
+categories, matched against the strings `slack.agent_operator` actually emits, so the most common
+real reason never lands in an uninformative "other" bucket.
+
+The information architecture is taken from the long-term roadmap rather than from the current feature
+set. `ROADMAP_UPDATED_LONGTERM.md` §11 makes multi-KVM orchestration the normal case, so a fleet rail
+keeps every configured environment visible and independently actionable instead of hiding them behind
+a selector; §16 defines skills as a navigable tree, so the sidebar is grouped by skill domain with
+planned milestones present but disabled; §10 defines autonomy levels, so live skills display theirs.
+Long-running work streams into a drawer docked at the bottom rather than a card, because a run
+started from the fleet rail must stay observable from any section.

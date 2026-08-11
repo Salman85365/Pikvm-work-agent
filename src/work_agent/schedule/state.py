@@ -35,6 +35,27 @@ class ReconciliationStateStore:
             return profiles
         return tuple(profile for profile in profiles if applied.get(profile) != desired.value)
 
+    def applied_state(self) -> tuple[dict[str, str], datetime | None]:
+        """Return the last verified state per profile for read-only inspection."""
+
+        state = self._read()
+        applied = state.get("applied", {})
+        normalized: dict[str, str] = {}
+        if isinstance(applied, dict):
+            normalized = {
+                str(profile): str(availability)
+                for profile, availability in applied.items()
+                if isinstance(profile, str) and isinstance(availability, str)
+            }
+        raw_updated = state.get("updated_at")
+        updated_at: datetime | None = None
+        if isinstance(raw_updated, str):
+            try:
+                updated_at = datetime.fromisoformat(raw_updated)
+            except ValueError:
+                updated_at = None
+        return normalized, updated_at
+
     def record_successes(self, result: AvailabilityBatchResult) -> None:
         state = self._read()
         applied = state.get("applied", {})

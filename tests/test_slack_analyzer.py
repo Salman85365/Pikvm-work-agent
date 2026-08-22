@@ -215,6 +215,187 @@ def test_visible_availability_toggle_skips_profile_refinement() -> None:
     assert delegate.focused_objectives == []
 
 
+def test_visible_toggle_locally_verifies_profile_navigation_before_state_change() -> None:
+    toggle = _element(
+        element_id="manual_availability_toggle",
+        label="Set yourself as active",
+        role=UIElementRole.MENU_ITEM,
+        point=NormalizedPoint(x=95, y=709),
+        box=BoundingBox(x1=50, y1=694, x2=139, y2=725),
+        visible_text="Set yourself as active",
+    )
+    uncertain = ActionVerification(
+        status=VerificationStatus.UNCERTAIN,
+        confidence=0.84,
+        evidence="The model was unsure whether the profile menu opened.",
+        expected_outcome_observed=False,
+    )
+    observation = ScreenObservation(
+        analysis=_analysis(target=toggle, relevant=[toggle]),
+        previous_action_verification=uncertain,
+    )
+    delegate = _Analyzer(observation, _analysis(target=toggle))
+
+    result = _wrapper(delegate).observe(
+        b"image",
+        context=ObservationContext(
+            objective="Set Slack active",
+            previous_action="click_element element=account_profile_avatar",
+            expected_outcome="The Slack profile menu opens.",
+        ),
+        width=1920,
+        height=1080,
+    )
+
+    assert result.previous_action_verification is not None
+    assert result.previous_action_verification.status is VerificationStatus.SUCCESS
+    assert result.previous_action_verification.expected_outcome_observed is True
+    assert "manual availability menu" in result.previous_action_verification.evidence
+
+
+def test_visible_toggle_does_not_override_unrelated_action_verification() -> None:
+    toggle = _element(
+        element_id="manual_availability_toggle",
+        label="Set yourself as active",
+        role=UIElementRole.MENU_ITEM,
+        point=NormalizedPoint(x=95, y=709),
+        box=BoundingBox(x1=50, y1=694, x2=139, y2=725),
+        visible_text="Set yourself as active",
+    )
+    uncertain = ActionVerification(
+        status=VerificationStatus.UNCERTAIN,
+        confidence=0.84,
+        evidence="The unrelated action could not be verified.",
+        expected_outcome_observed=False,
+    )
+    observation = ScreenObservation(
+        analysis=_analysis(target=toggle, relevant=[toggle]),
+        previous_action_verification=uncertain,
+    )
+    delegate = _Analyzer(observation, _analysis(target=toggle))
+
+    result = _wrapper(delegate).observe(
+        b"image",
+        context=ObservationContext(
+            objective="Set Slack active",
+            previous_action="click_element element=channel_general",
+            expected_outcome="An unrelated control changes.",
+        ),
+        width=1920,
+        height=1080,
+    )
+
+    assert result.previous_action_verification == uncertain
+
+
+def test_matching_text_outside_a_manual_control_does_not_verify_profile_menu() -> None:
+    message_like_text = _element(
+        element_id="unrelated_visible_text",
+        label="Set yourself as active",
+        role=UIElementRole.LIST_ITEM,
+        point=NormalizedPoint(x=500, y=500),
+        box=BoundingBox(x1=400, y1=480, x2=600, y2=520),
+        visible_text="Set yourself as active",
+    )
+    uncertain = ActionVerification(
+        status=VerificationStatus.UNCERTAIN,
+        confidence=0.84,
+        evidence="The profile menu was not established.",
+        expected_outcome_observed=False,
+    )
+    observation = ScreenObservation(
+        analysis=_analysis(target=message_like_text, relevant=[message_like_text]),
+        previous_action_verification=uncertain,
+    )
+    delegate = _Analyzer(observation, _analysis(target=message_like_text))
+
+    result = _wrapper(delegate).observe(
+        b"image",
+        context=ObservationContext(
+            objective="Set Slack active",
+            previous_action="click_element element=account_profile_avatar",
+            expected_outcome="The Slack profile menu opens.",
+        ),
+        width=1920,
+        height=1080,
+    )
+
+    assert result.previous_action_verification == uncertain
+
+
+def test_toggle_id_overlapping_profile_terms_stays_mutation_verification() -> None:
+    toggle = _element(
+        element_id="profile_availability_toggle",
+        label="Set yourself as active",
+        role=UIElementRole.MENU_ITEM,
+        point=NormalizedPoint(x=95, y=709),
+        box=BoundingBox(x1=50, y1=694, x2=139, y2=725),
+        visible_text="Set yourself as active",
+    )
+    failed = ActionVerification(
+        status=VerificationStatus.FAILURE,
+        confidence=0.92,
+        evidence="The availability did not visibly change.",
+        expected_outcome_observed=False,
+    )
+    observation = ScreenObservation(
+        analysis=_analysis(target=toggle, relevant=[toggle]),
+        previous_action_verification=failed,
+    )
+    delegate = _Analyzer(observation, _analysis(target=toggle))
+
+    result = _wrapper(delegate).observe(
+        b"image",
+        context=ObservationContext(
+            objective="Set Slack active",
+            previous_action="click_element element=profile_availability_toggle",
+            expected_outcome="The manual availability changes.",
+        ),
+        width=1920,
+        height=1080,
+    )
+
+    assert result.previous_action_verification == failed
+
+
+def test_hard_warning_prevents_local_profile_navigation_verification() -> None:
+    toggle = _element(
+        element_id="manual_availability_toggle",
+        label="Set yourself as active",
+        role=UIElementRole.MENU_ITEM,
+        point=NormalizedPoint(x=95, y=709),
+        box=BoundingBox(x1=50, y1=694, x2=139, y2=725),
+        visible_text="Set yourself as active",
+    )
+    uncertain = ActionVerification(
+        status=VerificationStatus.UNCERTAIN,
+        confidence=0.84,
+        evidence="The navigation result is uncertain.",
+        expected_outcome_observed=False,
+    )
+    analysis = _analysis(target=toggle, relevant=[toggle]).model_copy(
+        update={"warnings": [SafetyWarning.AUTHENTICATION_PROMPT]}
+    )
+    observation = ScreenObservation(
+        analysis=analysis,
+        previous_action_verification=uncertain,
+    )
+    delegate = _Analyzer(observation, analysis)
+
+    result = _wrapper(delegate).observe(
+        b"image",
+        context=ObservationContext(
+            objective="Set Slack active",
+            previous_action="click_element element=account_profile_avatar",
+            expected_outcome="The Slack profile menu opens.",
+        ),
+        width=1920,
+        height=1080,
+    )
+
+    assert result.previous_action_verification == uncertain
+
+
 def test_closed_menu_after_toggle_defers_to_read_only_verification_session() -> None:
     profile = _element(
         element_id="profile_avatar",

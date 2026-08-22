@@ -15,11 +15,18 @@ from work_agent.agent.models import (
     ClickElementAction,
     DoubleClickElementAction,
     MoveMouseAction,
+    ScrollAction,
 )
 from work_agent.pikvm import Screenshot
 from work_agent.vision import ScreenAnalysis
 
 _COMPARE_SIZE = (64, 36)
+_COMPARE_CELLS = _COMPARE_SIZE[0] * _COMPARE_SIZE[1]
+# A cell must move this many grey levels to count as genuinely different. Each cell averages
+# roughly 900 source pixels, so JPEG noise is suppressed hard: unchanged real frames measured
+# 0.0001 mean difference (~0.03 levels). Slack's profile menu measured only ~20 levels against
+# its surroundings, so this must stay well below that.
+_CELL_CHANGE_DELTA = 10
 
 
 @dataclass(frozen=True, slots=True)
@@ -53,6 +60,7 @@ class SettleResult:
     polls: int
     elapsed_seconds: float
     difference: float
+    changed_fraction: float = 0.0
 
 
 def signature(content: bytes) -> ScreenSignature:
@@ -71,13 +79,33 @@ def signature(content: bytes) -> ScreenSignature:
     )
 
 
-def difference(first: ScreenSignature, second: ScreenSignature) -> float:
-    if (first.width, first.height) != (second.width, second.height):
-        return 1.0
+def _delta_image(first: ScreenSignature, second: ScreenSignature) -> Image.Image:
     first_image = Image.frombytes("L", _COMPARE_SIZE, first.grayscale)
     second_image = Image.frombytes("L", _COMPARE_SIZE, second.grayscale)
-    value = ImageStat.Stat(ImageChops.difference(first_image, second_image)).mean[0]
-    return value / 255.0
+    return ImageChops.difference(first_image, second_image)
+
+
+def difference(first: ScreenSignature, second: ScreenSignature) -> float:
+    """Whole-screen mean change. Deliberately insensitive, so the stale-plan guard does
+    not cancel a valid plan over cursor blink or video noise."""
+
+    if (first.width, first.height) != (second.width, second.height):
+        return 1.0
+    return ImageStat.Stat(_delta_image(first, second)).mean[0] / 255.0
+
+
+def changed_fraction(first: ScreenSignature, second: ScreenSignature) -> float:
+    """Fraction of compare cells that moved materially.
+
+    A small popover — Slack's profile menu is roughly 5% of the screen — barely shifts the
+    whole-screen mean, so `difference` alone reports "nothing happened" for a menu that
+    visibly opened. This localized signal sees it.
+    """
+
+    if (first.width, first.height) != (second.width, second.height):
+        return 1.0
+    histogram = _delta_image(first, second).histogram()
+    return sum(histogram[_CELL_CHANGE_DELTA:]) / _COMPARE_CELLS
 
 
 class PreActionGuard:
@@ -103,13 +131,19 @@ class PreActionGuard:
                 reason="Screen dimensions changed after planning.",
                 difference=1.0,
             )
-        if isinstance(action, (MoveMouseAction, ClickElementAction, DoubleClickElementAction)):
+        target_id: str | None = None
+        if isinstance(
+            action,
+            (MoveMouseAction, ClickElementAction, DoubleClickElementAction, ScrollAction),
+        ):
+            target_id = action.element_id
+        if target_id is not None:
             element = next(
                 (
                     element
                     for element in ([screen.target] if screen.target is not None else [])
                     + screen.relevant_elements
-                    if element.id == action.element_id
+                    if element.id == target_id
                 ),
                 None,
             )
@@ -141,6 +175,7 @@ class ScreenSettleDetector:
         timeout_seconds: float,
         stable_frames: int,
         stable_threshold: float,
+        localized_change_threshold: float = 0.004,
         sleeper: Callable[[float], None] = time.sleep,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
@@ -148,6 +183,7 @@ class ScreenSettleDetector:
         self._timeout = timeout_seconds
         self._stable_frames = stable_frames
         self._stable_threshold = stable_threshold
+        self._localized_threshold = localized_change_threshold
         self._sleeper = sleeper
         self._clock = clock
 
@@ -162,6 +198,7 @@ class ScreenSettleDetector:
         previous = baseline
         latest = before
         latest_difference = 0.0
+        latest_fraction = 0.0
         changed = False
         stable_count = 0
         polls = 0
@@ -172,8 +209,13 @@ class ScreenSettleDetector:
             polls += 1
             current = signature(latest.content)
             latest_difference = difference(baseline, current)
+            latest_fraction = changed_fraction(baseline, current)
             frame_difference = difference(previous, current)
-            if latest_difference >= self._stable_threshold:
+            # A small popover moves few cells a lot, so accept either signal as "changed".
+            if (
+                latest_difference >= self._stable_threshold
+                or latest_fraction >= self._localized_threshold
+            ):
                 changed = True
             if changed and frame_difference <= self._stable_threshold:
                 stable_count += 1
@@ -186,6 +228,7 @@ class ScreenSettleDetector:
                         polls=polls,
                         elapsed_seconds=max(0.0, self._clock() - started),
                         difference=latest_difference,
+                        changed_fraction=latest_fraction,
                     )
             else:
                 stable_count = 0
@@ -199,4 +242,5 @@ class ScreenSettleDetector:
             polls=polls,
             elapsed_seconds=max(0.0, self._clock() - started),
             difference=latest_difference,
+            changed_fraction=latest_fraction,
         )

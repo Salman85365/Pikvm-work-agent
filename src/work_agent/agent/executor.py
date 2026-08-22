@@ -35,6 +35,8 @@ from work_agent.pikvm import (
 )
 from work_agent.vision import ScreenAnalysis, UIElement, normalized_to_pixel
 
+_HOVER_SETTLE_SECONDS = 0.1
+
 
 class HIDClient(Protocol):
     def press_key(self, key: str) -> None: ...
@@ -122,6 +124,10 @@ class ActionExecutor:
                     button=MouseButton.LEFT,
                 )
             elif isinstance(action, ScrollAction):
+                if action.element_id is not None:
+                    point, size = self._resolve(action.element_id, screen)
+                    self._client.move_mouse(point[0], point[1], screen_size=size)
+                    self._sleeper(_HOVER_SETTLE_SECONDS)
                 multiplier = 1 if action.direction is ScrollDirection.UP else -1
                 self._client.scroll(multiplier * action.amount * 120)
             else:

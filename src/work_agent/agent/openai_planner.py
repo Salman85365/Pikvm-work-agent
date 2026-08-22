@@ -29,9 +29,11 @@ from work_agent.agent.models import (
     ExecutionResult,
     MoveMouseAction,
     PlanningResult,
+    ScrollAction,
     action_summary,
     zero_usage,
 )
+from work_agent.agent.policy import SAFE_HOTKEYS, SAFE_KEYS
 from work_agent.agent.prompts import ACTION_PLANNER_PROMPT
 from work_agent.vision.models import (
     ActionVerification,
@@ -70,6 +72,7 @@ class OpenAIActionPlanner:
         previous_verification: ActionVerification | None,
         history: Sequence[AgentStepSummary],
         remaining_steps: int,
+        feedback: str | None = None,
     ) -> PlanningResult:
         normalized_objective = objective.strip()
         if not normalized_objective:
@@ -79,6 +82,8 @@ class OpenAIActionPlanner:
 
         started = self._clock()
         retries = 0
+        invalid_proposals = 0
+        correction: str | None = None
         while True:
             try:
                 reasoning: Reasoning = {"effort": self._settings.planner_reasoning_effort.value}
@@ -92,6 +97,8 @@ class OpenAIActionPlanner:
                         previous_verification=previous_verification,
                         history=history,
                         remaining_steps=remaining_steps,
+                        feedback=feedback,
+                        correction=correction,
                     ),
                     text_format=ActionProposal,
                     reasoning=reasoning,
@@ -103,7 +110,15 @@ class OpenAIActionPlanner:
                     raise PlannerStructuredOutputError(
                         "OpenAI returned no valid structured action proposal."
                     )
-                self._validate_element_reference(proposal, screen)
+                problem = self._element_reference_problem(proposal, screen)
+                if problem is not None:
+                    # One invalid reference is a slip worth one correction, not a dead session.
+                    if invalid_proposals >= self._settings.planner_max_retries:
+                        raise PlannerStructuredOutputError(problem)
+                    invalid_proposals += 1
+                    retries += 1
+                    correction = problem
+                    continue
                 return PlanningResult(
                     proposal=proposal,
                     requested_model=self._settings.planner_model,
@@ -118,9 +133,15 @@ class OpenAIActionPlanner:
             except PlannerStructuredOutputError:
                 raise
             except (ValidationError, openai.APIResponseValidationError) as exc:
-                raise PlannerStructuredOutputError(
-                    "OpenAI returned an invalid structured action proposal."
-                ) from exc
+                if invalid_proposals >= self._settings.planner_max_retries:
+                    raise PlannerStructuredOutputError(
+                        "OpenAI returned an invalid structured action proposal."
+                    ) from exc
+                invalid_proposals += 1
+                retries += 1
+                correction = "The previous proposal was rejected by local validation: " + (
+                    _validation_summary(exc)
+                )
             except openai.AuthenticationError as exc:
                 raise PlannerAuthenticationError(
                     "OpenAI planner authentication failed. Check the local API key."
@@ -174,6 +195,8 @@ class OpenAIActionPlanner:
         previous_verification: ActionVerification | None,
         history: Sequence[AgentStepSummary],
         remaining_steps: int,
+        feedback: str | None = None,
+        correction: str | None = None,
     ) -> ResponseInputParam:
         elements: dict[str, UIElement] = {
             element.id: element for element in screen.relevant_elements
@@ -189,6 +212,8 @@ class OpenAIActionPlanner:
                 "confidence": screen.confidence,
                 "safe_to_continue": screen.safe_to_continue,
                 "warnings": [warning.value for warning in screen.warnings],
+                "size": {"width": screen.screenshot_width, "height": screen.screenshot_height},
+                "target_id": screen.target.id if screen.target is not None else None,
                 "elements": [self._element_payload(element) for element in elements.values()],
             },
             "previous_action": (
@@ -199,12 +224,23 @@ class OpenAIActionPlanner:
                     "status": previous_verification.status.value,
                     "confidence": previous_verification.confidence,
                     "expected_outcome_observed": (previous_verification.expected_outcome_observed),
+                    "evidence": previous_verification.evidence,
                 }
                 if previous_verification is not None
                 else None
             ),
             "recent_history": [item.model_dump(mode="json") for item in history[-5:]],
             "remaining_steps": remaining_steps,
+            "controller_feedback": feedback,
+            "correction": correction,
+            "policy_preapproved": {
+                "hotkeys": sorted("+".join(keys) for keys in SAFE_HOTKEYS),
+                "keys": sorted(SAFE_KEYS),
+                "note": (
+                    "Other keys/hotkeys and any typed text outside a visible search field need "
+                    "human approval, which unattended runs cannot give."
+                ),
+            },
         }
         message: EasyInputMessageParam = {
             "role": "user",
@@ -214,37 +250,54 @@ class OpenAIActionPlanner:
 
     @staticmethod
     def _element_payload(element: UIElement) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "id": element.id,
             "label": element.label,
             "role": element.role.value,
             "confidence": element.confidence,
-            "has_click_point": element.click_point is not None,
+            "clickable": element.click_point is not None,
         }
+        # visible_text is deliberately not forwarded: the planner needs geometry and labels,
+        # not the private text an element happens to display.
+        if element.bounding_box is not None:
+            box = element.bounding_box
+            payload["box"] = [box.x1, box.y1, box.x2, box.y2]
+        elif element.click_point is not None:
+            payload["at"] = [element.click_point.x, element.click_point.y]
+        return payload
 
     @staticmethod
-    def _validate_element_reference(
+    def _element_reference_problem(
         proposal: ActionProposal,
         screen: ScreenAnalysis,
-    ) -> None:
+    ) -> str | None:
         action = proposal.action
         if not isinstance(
             action,
-            (MoveMouseAction, ClickElementAction, DoubleClickElementAction),
+            (MoveMouseAction, ClickElementAction, DoubleClickElementAction, ScrollAction),
         ):
-            return
+            return None
+        target_id = action.element_id
+        if target_id is None:
+            return None
         elements = {element.id: element for element in screen.relevant_elements}
         if screen.target is not None:
             elements[screen.target.id] = screen.target
-        element = elements.get(action.element_id)
+        clickable = sorted(
+            element_id for element_id, item in elements.items() if item.click_point is not None
+        )
+        element = elements.get(target_id)
         if element is None:
-            raise PlannerStructuredOutputError(
-                "The planner referenced an element that is not in the current analysis."
+            return (
+                f"The planner referenced element {target_id!r}, which is not in the "
+                f"current analysis. Clickable element ids: {clickable}."
             )
         if element.click_point is None:
-            raise PlannerStructuredOutputError(
-                "The planner referenced an element without a validated click point."
+            return (
+                f"The planner referenced element {target_id!r}, which has no validated "
+                f"click point. Clickable element ids: {clickable}."
             )
+        return None
 
     def _backoff(self, retry_index: int) -> None:
         self._sleeper(0.5 * (2**retry_index))
@@ -261,3 +314,12 @@ class OpenAIActionPlanner:
             reasoning_tokens=usage.output_tokens_details.reasoning_tokens,
             total_tokens=usage.total_tokens,
         )
+
+
+def _validation_summary(exc: Exception) -> str:
+    if isinstance(exc, ValidationError):
+        return "; ".join(
+            f"{'.'.join(str(part) for part in error['loc']) or 'proposal'}: {error['msg']}"
+            for error in exc.errors()[:5]
+        )
+    return "the response did not match the action schema"

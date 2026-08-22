@@ -56,10 +56,10 @@ def test_vision_specific_environment_overrides_legacy_names(
     ("name", "value"),
     [
         ("OPENAI_PLANNER_SERVICE_TIER", "priority"),
-        ("OPENAI_PLANNER_REASONING_EFFORT", "high"),
-        ("OPENAI_PLANNER_MAX_RETRIES", "3"),
-        ("AGENT_MAX_STEPS", "26"),
-        ("AGENT_MAX_RUNTIME_SECONDS", "601"),
+        ("OPENAI_PLANNER_REASONING_EFFORT", "maximum"),
+        ("OPENAI_PLANNER_MAX_RETRIES", "6"),
+        ("AGENT_MAX_STEPS", "31"),
+        ("AGENT_MAX_RUNTIME_SECONDS", "901"),
         ("AGENT_MIN_ACTION_CONFIDENCE", "1.1"),
         ("AGENT_SCREEN_POLL_INTERVAL_MS", "10"),
     ],
@@ -89,6 +89,6 @@ def test_missing_planner_api_key_error_does_not_echo_secret(
 
 def test_controller_options_enforce_hard_caps_even_when_constructed_directly() -> None:
     with pytest.raises(ValueError, match="hard cap"):
-        ControllerOptions(max_steps=26, timeout_seconds=30)
-    with pytest.raises(ValueError, match="600"):
-        ControllerOptions(max_steps=1, timeout_seconds=601)
+        ControllerOptions(max_steps=31, timeout_seconds=30)
+    with pytest.raises(ValueError, match="900"):
+        ControllerOptions(max_steps=1, timeout_seconds=901)

@@ -12,68 +12,111 @@ from work_agent.dashboard.models import (
     HistorySummary,
     KvmOutcome,
     RunRecord,
+    RunTelemetry,
 )
+from work_agent.schedule.runlog import LOCK_BUSY_STOP_CODE
 
 _MAX_REASONS = 8
 
-# Ordered most-specific first; the first matching fragment wins. Fragments must match the
-# sanitized strings that work_agent.slack.agent_operator actually writes to the log.
+# Preferred classification: the controller's own StopCode, recorded per run. Keep the keys as
+# plain strings so an old log written by a newer/older build still renders.
+_STOP_CODE_LABELS: dict[str, str] = {
+    "verification_failed": "Could not verify the last action",
+    "verification_missing": "Observation returned no verification",
+    "completion_unverified": "Finished without visible proof",
+    "policy_denied": "Local policy denied the action",
+    "approval_denied": "Needed interactive approval",
+    "step_cancelled": "Step cancelled before execution",
+    "user_assistance_requested": "Planner asked for help",
+    "screen_unsafe": "Screen unsafe for unattended use",
+    "screen_low_confidence": "Screen below the confidence threshold",
+    "planner_low_confidence": "Next action below the confidence threshold",
+    "transport_failed": "PiKVM rejected the HID action",
+    "stuck_repeated_action": "Stopped instead of repeating an action",
+    "stuck_no_screen_change": "Action produced no screen change",
+    "runtime_limit": "Hit the runtime limit",
+    "step_limit": "Hit the step limit",
+    "interrupted": "Interrupted",
+    "pikvm_unreachable": "PiKVM unreachable",
+    "pikvm_auth_failed": "PiKVM rejected credentials",
+    "model_provider_error": "OpenAI API unavailable",
+    "model_output_invalid": "OpenAI output failed local schema",
+    "internal_error": "Local error stopped the controller",
+    "lock_busy": "Another workflow held the PiKVM",
+}
+
+# Fallback for records written before stop_code existed. Ordered most-specific first; the first
+# matching fragment wins. Categories deliberately reuse the StopCode vocabulary above so the
+# chart stays continuous across the transition. New code paths must not rely on this.
 _FAILURE_CATEGORIES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
     (
-        "verification",
-        "Could not verify the result",
-        (
-            "could not be visually verified",
-            "was not verified",
-            "no manual availability evidence",
-            "verification did not complete",
-        ),
+        "verification_failed",
+        _STOP_CODE_LABELS["verification_failed"],
+        ("could not be visually verified", "was not verified", "verification did not complete"),
     ),
     (
-        "approval",
-        "Needed interactive approval",
+        "completion_unverified",
+        _STOP_CODE_LABELS["completion_unverified"],
+        ("no manual availability evidence", "not requested"),
+    ),
+    (
+        "approval_denied",
+        _STOP_CODE_LABELS["approval_denied"],
         ("interactive approval",),
     ),
     (
-        "unsafe_screen",
-        "Screen unsafe for unattended use",
-        ("unsafe for unattended", "requested user assistance"),
+        "user_assistance_requested",
+        _STOP_CODE_LABELS["user_assistance_requested"],
+        ("requested user assistance",),
     ),
     (
-        "low_confidence",
-        "Below the confidence threshold",
+        "screen_unsafe",
+        _STOP_CODE_LABELS["screen_unsafe"],
+        ("unsafe for unattended",),
+    ),
+    (
+        "screen_low_confidence",
+        _STOP_CODE_LABELS["screen_low_confidence"],
         ("confidence",),
     ),
     (
-        "stuck",
-        "Stopped instead of repeating an action",
-        ("unchanged screen", "no visible screen change", "stuck", "did not change"),
+        "stuck_repeated_action",
+        _STOP_CODE_LABELS["stuck_repeated_action"],
+        ("unchanged screen", "stuck"),
     ),
     (
-        "limit",
-        "Hit a step or runtime limit",
-        ("runtime limit", "maximum verified step", "step count"),
+        "stuck_no_screen_change",
+        _STOP_CODE_LABELS["stuck_no_screen_change"],
+        ("no visible screen change", "did not change"),
     ),
     (
-        "wrong_state",
-        "Ended in the wrong visible state",
-        ("not requested",),
+        "runtime_limit",
+        _STOP_CODE_LABELS["runtime_limit"],
+        ("runtime limit",),
     ),
     (
-        "controller_failed",
-        "Controller failed without a specific reason",
-        ("stopped with status failed",),
+        "step_limit",
+        _STOP_CODE_LABELS["step_limit"],
+        ("maximum verified step", "step count"),
     ),
     (
-        "controller_paused",
-        "Controller paused before finishing",
-        ("stopped with status paused", "paused before slack availability"),
+        "legacy_unclassified",
+        "Recorded before stop codes existed",
+        ("stopped with status failed", "stopped with status paused", "paused before slack"),
     ),
 )
 
 
-def _categorize(reason: str) -> tuple[str, str]:
-    lowered = reason.casefold()
+def _categorize(record: RunRecord) -> tuple[str, str]:
+    """Classify a stop by its recorded code, falling back to text only for old records."""
+
+    if record.stop_code is not None:
+        label = _STOP_CODE_LABELS.get(record.stop_code)
+        if label is not None:
+            return record.stop_code, label
+        return record.stop_code, record.stop_code.replace("_", " ").capitalize()
+
+    lowered = (record.error or "").casefold()
     for category, label, fragments in _FAILURE_CATEGORIES:
         if any(fragment in lowered for fragment in fragments):
             return category, label
@@ -98,6 +141,7 @@ def _parse_record(payload: object) -> RunRecord | None:
     observed = payload.get("observed_availability")
     changed = payload.get("changed")
     error = payload.get("error")
+    stop_code = payload.get("stop_code")
     return RunRecord(
         timestamp=timestamp,
         kvm=kvm,
@@ -105,8 +149,53 @@ def _parse_record(payload: object) -> RunRecord | None:
         observed=observed if isinstance(observed, str) else "unknown",
         changed=changed if isinstance(changed, bool) else None,
         outcome=outcome,
+        stop_code=stop_code if isinstance(stop_code, str) else None,
         error=error if isinstance(error, str) else None,
+        telemetry=_parse_telemetry(payload.get("telemetry")),
     )
+
+
+def _parse_telemetry(payload: object) -> RunTelemetry | None:
+    if not isinstance(payload, dict):
+        return None
+    counts: dict[str, int] = {}
+    keys = ("sessions", "steps", "hid_actions", "vision_calls", "planner_calls", "total_tokens")
+    for key in keys:
+        value = payload.get(key, 0)
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            return None
+        counts[key] = max(0, int(value))
+    runtime = payload.get("runtime_seconds", 0.0)
+    if isinstance(runtime, bool) or not isinstance(runtime, int | float):
+        return None
+    return RunTelemetry(
+        sessions=counts["sessions"],
+        steps=counts["steps"],
+        hid_actions=counts["hid_actions"],
+        vision_calls=counts["vision_calls"],
+        planner_calls=counts["planner_calls"],
+        total_tokens=counts["total_tokens"],
+        runtime_seconds=max(0.0, float(runtime)),
+    )
+
+
+def _skipped(record: RunRecord) -> bool:
+    """A run that never touched the KVM because another workflow held it is not a failure."""
+
+    return record.outcome == "failure" and record.stop_code == LOCK_BUSY_STOP_CODE
+
+
+def _trailing_failures(owned: list[RunRecord]) -> int:
+    """Count consecutive failures ending at the newest record, ignoring skipped runs."""
+
+    count = 0
+    for record in sorted(owned, key=lambda record: record.timestamp, reverse=True):
+        if _skipped(record):
+            continue
+        if record.outcome != "failure":
+            break
+        count += 1
+    return count
 
 
 def _read_lines(path: Path) -> tuple[list[RunRecord], int]:
@@ -132,41 +221,45 @@ def _read_lines(path: Path) -> tuple[list[RunRecord], int]:
 
 def _summarize(records: list[RunRecord]) -> HistorySummary:
     success = sum(1 for record in records if record.outcome == "success")
-    failure = len(records) - success
+    skipped = sum(1 for record in records if _skipped(record))
+    failure = len(records) - success - skipped
     changes = sum(1 for record in records if record.outcome == "success" and record.changed is True)
 
     per_kvm: list[KvmOutcome] = []
     for kvm in sorted({record.kvm for record in records}):
         owned = [record for record in records if record.kvm == kvm]
         kvm_success = sum(1 for record in owned if record.outcome == "success")
+        kvm_skipped = sum(1 for record in owned if _skipped(record))
+        counted = len(owned) - kvm_skipped
         latest = max(owned, key=lambda record: record.timestamp)
         per_kvm.append(
             KvmOutcome(
                 kvm=kvm,
                 total=len(owned),
                 success=kvm_success,
-                failure=len(owned) - kvm_success,
-                success_rate=kvm_success / len(owned) if owned else 0.0,
+                failure=counted - kvm_success,
+                skipped=kvm_skipped,
+                success_rate=kvm_success / counted if counted else 0.0,
                 last_outcome=latest.outcome,
                 last_observed=latest.observed,
                 last_at=latest.timestamp,
+                last_stop_code=latest.stop_code,
+                consecutive_failures=_trailing_failures(owned),
             )
         )
 
-    stops = [
-        record.error.strip()
-        for record in records
-        if record.outcome == "failure" and record.error and record.error.strip()
-    ]
-    counter = Counter(stops)
+    failures = [record for record in records if record.outcome == "failure"]
+    counter = Counter(
+        record.error.strip() for record in failures if record.error and record.error.strip()
+    )
     reasons = [
         FailureReason(reason=reason, count=count)
         for reason, count in counter.most_common(_MAX_REASONS)
     ]
 
     grouped: dict[str, tuple[str, int]] = {}
-    for reason in stops:
-        category, label = _categorize(reason)
+    for record in failures:
+        category, label = _categorize(record)
         existing = grouped.get(category)
         grouped[category] = (label, (existing[1] if existing else 0) + 1)
     categories = [
@@ -177,11 +270,13 @@ def _summarize(records: list[RunRecord]) -> HistorySummary:
     ]
 
     timestamps = [record.timestamp for record in records]
+    counted = len(records) - skipped
     return HistorySummary(
         total=len(records),
         success=success,
         failure=failure,
-        success_rate=success / len(records) if records else 0.0,
+        skipped=skipped,
+        success_rate=success / counted if counted else 0.0,
         changes_applied=changes,
         no_ops=sum(
             1

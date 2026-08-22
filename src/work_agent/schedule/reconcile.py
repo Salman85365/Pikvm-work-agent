@@ -53,3 +53,33 @@ def next_transition(moment: datetime) -> tuple[datetime, Availability]:
             if boundary > local:
                 return boundary, availability
     raise ScheduleError("No upcoming Slack availability transition could be calculated.")
+
+
+def last_transition(moment: datetime) -> tuple[datetime, Availability]:
+    """Return the most recent Asia/Karachi boundary at or before ``moment`` and its state."""
+
+    if moment.tzinfo is None or moment.utcoffset() is None:
+        raise ScheduleError("Availability reconciliation requires a timezone-aware timestamp.")
+    local = moment.astimezone(KARACHI_TIMEZONE)
+    for offset in range(_SEARCH_DAYS):
+        day = (local - timedelta(days=offset)).date()
+        weekday = day.weekday()
+        candidates: list[tuple[datetime, Availability]] = []
+        if 1 <= weekday <= 5:
+            candidates.append(
+                (
+                    datetime.combine(day, _AWAY_START, tzinfo=KARACHI_TIMEZONE),
+                    Availability.AWAY,
+                )
+            )
+        if weekday <= 4:
+            candidates.append(
+                (
+                    datetime.combine(day, _ACTIVE_START, tzinfo=KARACHI_TIMEZONE),
+                    Availability.ACTIVE,
+                )
+            )
+        for boundary, availability in sorted(candidates, reverse=True):
+            if boundary <= local:
+                return boundary, availability
+    raise ScheduleError("No previous Slack availability transition could be calculated.")

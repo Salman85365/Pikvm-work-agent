@@ -3,8 +3,11 @@ from __future__ import annotations
 from collections.abc import Callable
 
 from work_agent.slack.state import (
+    has_visible_manual_availability_control,
     infer_slack_availability,
     is_availability_toggle_reference,
+    is_profile_menu_outcome_reference,
+    is_profile_navigation_reference,
 )
 from work_agent.vision import (
     ActionVerification,
@@ -26,12 +29,11 @@ _PROFILE_LOCALIZATION_OBJECTIVE = """Slack is foreground. Locate only the full c
 profile/avatar button that opens the Slack profile menu. Put the click point well inside the center
 of the full button, not on its presence badge or below the control. Do not inspect messages."""
 _PROFILE_MARKERS = ("profile", "avatar", "account")
-_PROFILE_ROLES = frozenset({UIElementRole.BUTTON, UIElementRole.ICON})
+_PROFILE_ROLES = frozenset({UIElementRole.BUTTON, UIElementRole.ICON, UIElementRole.UNKNOWN})
 _NON_OVERRIDABLE_WARNINGS = frozenset(
     {
         SafetyWarning.AUTHENTICATION_PROMPT,
         SafetyWarning.LOCK_SCREEN,
-        SafetyWarning.UNEXPECTED_DIALOG,
         SafetyWarning.DESTRUCTIVE_CONFIRMATION,
         SafetyWarning.REMOTE_DISCONNECT,
     }
@@ -86,6 +88,10 @@ class SlackAvailabilityScreenAnalyzer:
             options=options,
         )
         hard_warnings = _NON_OVERRIDABLE_WARNINGS.intersection(observation.analysis.warnings)
+        if SafetyWarning.UNEXPECTED_DIALOG in observation.analysis.warnings:
+            self._event_sink(
+                "Vision warning: unexpected_dialog (routing around it, not answering)."
+            )
         if hard_warnings:
             categories = ",".join(sorted(warning.value for warning in hard_warnings))
             self._event_sink(f"Vision safety stop: {categories}.")
@@ -101,6 +107,18 @@ class SlackAvailabilityScreenAnalyzer:
                 options=self._fallback_options(options),
             )
             observation = _merge_observations(observation, confirmation)
+
+        if _profile_navigation_is_visibly_complete(context, observation.analysis):
+            observation = observation.model_copy(
+                update={
+                    "previous_action_verification": ActionVerification(
+                        status=VerificationStatus.SUCCESS,
+                        confidence=observation.analysis.confidence,
+                        evidence=("Fresh screen visibly shows Slack's manual availability menu."),
+                        expected_outcome_observed=True,
+                    )
+                }
+            )
 
         if (
             context.previous_action is not None
@@ -182,6 +200,24 @@ class SlackAvailabilityScreenAnalyzer:
                 "image_detail": ImageDetail.HIGH,
             }
         )
+
+
+def _profile_navigation_is_visibly_complete(
+    context: ObservationContext,
+    analysis: ScreenAnalysis,
+) -> bool:
+    previous_action = (context.previous_action or "").strip().casefold()
+    if not previous_action.startswith("click_element element="):
+        return False
+    element_id = previous_action.removeprefix("click_element element=")
+    return (
+        analysis.safe_to_continue
+        and not _NON_OVERRIDABLE_WARNINGS.intersection(analysis.warnings)
+        and "slack" in analysis.application.casefold()
+        and is_profile_navigation_reference(element_id)
+        and is_profile_menu_outcome_reference(context.expected_outcome)
+        and has_visible_manual_availability_control(analysis)
+    )
 
 
 def _merge_observations(

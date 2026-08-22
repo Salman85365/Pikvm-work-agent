@@ -23,6 +23,7 @@ from work_agent.agent.models import (
     PolicyDecision,
     PressKeyAction,
     RiskCategory,
+    StopCode,
     TextPurpose,
     TypeTextAction,
     zero_usage,
@@ -152,6 +153,7 @@ class _Planner:
         previous_verification: ActionVerification | None,
         history: Sequence[AgentStepSummary],
         remaining_steps: int,
+        feedback: str | None = None,
     ) -> PlanningResult:
         self.calls += 1
         proposal = self.proposals.pop(0)
@@ -289,6 +291,7 @@ def _controller(
         completion_validator=completion_validator,
         verification_override=verification_override,
         clock=clock or (lambda: 0.0),
+        sleeper=lambda _: None,
     )
     return controller, remote, planner, analyzer
 
@@ -463,10 +466,40 @@ def test_dry_run_never_reaches_hid_or_preaction_capture() -> None:
     assert remote.calls == []
 
 
-@pytest.mark.parametrize("status", [VerificationStatus.FAILURE, VerificationStatus.UNCERTAIN])
-def test_failed_or_uncertain_verification_stops_without_repeating(
-    status: VerificationStatus,
-) -> None:
+def test_uncertain_verification_earns_one_delayed_re_observation() -> None:
+    """A menu still animating when the settled frame was taken must not end the run."""
+    initial = _screenshot("white")
+    later = _screenshot("black")
+    controller, remote, _, analyzer = _controller(
+        screenshots=[initial, initial, later],
+        settled=[later],
+        observations=[
+            ScreenObservation(analysis=_analysis(), previous_action_verification=None),
+            ScreenObservation(
+                analysis=_analysis(),
+                previous_action_verification=_verification(VerificationStatus.UNCERTAIN),
+            ),
+            ScreenObservation(
+                analysis=_analysis(),
+                previous_action_verification=_verification(VerificationStatus.SUCCESS),
+            ),
+        ],
+        proposals=[
+            _proposal(PressKeyAction(type="press_key", key="Escape")),
+            _proposal(FinishAction(type="finish", summary="Done.")),
+        ],
+    )
+
+    result = controller.run("Open Slack")
+
+    assert result.status is AgentFinalStatus.SUCCESS
+    assert remote.calls == [("press_key", "Escape")]
+    assert len(analyzer.contexts) == 3
+    assert analyzer.contexts[2].previous_action == "press_key Escape"
+    assert result.telemetry.verification_failures == 1
+
+
+def test_failed_verification_replans_but_never_repeats_the_unverified_action() -> None:
     initial = _screenshot("white")
     controller, remote, planner, _ = _controller(
         screenshots=[initial, initial],
@@ -475,18 +508,87 @@ def test_failed_or_uncertain_verification_stops_without_repeating(
             ScreenObservation(analysis=_analysis(), previous_action_verification=None),
             ScreenObservation(
                 analysis=_analysis(),
-                previous_action_verification=_verification(status),
+                previous_action_verification=_verification(VerificationStatus.FAILURE),
             ),
         ],
-        proposals=[_proposal(PressKeyAction(type="press_key", key="Escape"))],
+        proposals=[
+            _proposal(PressKeyAction(type="press_key", key="Escape")),
+            _proposal(PressKeyAction(type="press_key", key="Escape")),
+        ],
     )
 
     result = controller.run("Open Slack")
 
     assert result.status is AgentFinalStatus.FAILED
+    assert result.stop_code is StopCode.VERIFICATION_FAILED
     assert remote.calls == [("press_key", "Escape")]
-    assert planner.calls == 1
+    assert planner.calls == 2
     assert result.telemetry.verification_failures == 1
+
+
+def test_failed_verification_recovery_may_take_a_different_route() -> None:
+    initial = _screenshot("white")
+    controller, remote, _, _ = _controller(
+        screenshots=[initial, initial, _screenshot("black")],
+        settled=[_screenshot("black"), _screenshot("white")],
+        observations=[
+            ScreenObservation(analysis=_analysis(), previous_action_verification=None),
+            ScreenObservation(
+                analysis=_analysis(),
+                previous_action_verification=_verification(VerificationStatus.FAILURE),
+            ),
+            ScreenObservation(
+                analysis=_analysis(),
+                previous_action_verification=_verification(VerificationStatus.SUCCESS),
+            ),
+        ],
+        proposals=[
+            _proposal(PressKeyAction(type="press_key", key="Escape")),
+            _proposal(PressKeyAction(type="press_key", key="Tab")),
+            _proposal(FinishAction(type="finish", summary="Done.")),
+        ],
+    )
+
+    result = controller.run("Open Slack")
+
+    assert result.status is AgentFinalStatus.SUCCESS
+    assert remote.calls == [("press_key", "Escape"), ("press_key", "Tab")]
+
+
+def test_verification_recoveries_are_bounded() -> None:
+    initial = _screenshot("white")
+    controller, remote, _, _ = _controller(
+        screenshots=[initial, initial, _screenshot("black"), initial],
+        settled=[_screenshot("black"), _screenshot("white"), _screenshot("black")],
+        observations=[
+            ScreenObservation(analysis=_analysis(), previous_action_verification=None),
+            ScreenObservation(
+                analysis=_analysis(),
+                previous_action_verification=_verification(VerificationStatus.FAILURE),
+            ),
+            ScreenObservation(
+                analysis=_analysis(),
+                previous_action_verification=_verification(VerificationStatus.FAILURE),
+            ),
+            ScreenObservation(
+                analysis=_analysis(),
+                previous_action_verification=_verification(VerificationStatus.FAILURE),
+            ),
+        ],
+        proposals=[
+            _proposal(PressKeyAction(type="press_key", key="Escape")),
+            _proposal(PressKeyAction(type="press_key", key="Tab")),
+            _proposal(PressKeyAction(type="press_key", key="ArrowDown")),
+            _proposal(PressKeyAction(type="press_key", key="ArrowUp")),
+        ],
+    )
+
+    result = controller.run("Open Slack")
+
+    assert result.status is AgentFinalStatus.FAILED
+    assert result.stop_code is StopCode.VERIFICATION_FAILED
+    assert len(remote.calls) == 3
+    assert result.telemetry.verification_failures == 3
 
 
 def test_low_screen_confidence_stops_before_planner() -> None:

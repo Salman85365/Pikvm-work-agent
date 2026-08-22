@@ -34,7 +34,9 @@ class JsonlAvailabilityLogger:
             ),
             "changed": result.changed,
             "outcome": "success" if result.success else "failure",
+            "stop_code": result.stop_code,
             "error": result.error,
+            "telemetry": result.telemetry.as_dict() if result.telemetry is not None else None,
         }
         try:
             self._path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)

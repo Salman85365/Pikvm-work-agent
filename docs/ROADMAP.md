@@ -11,7 +11,9 @@
 | M4.5 | Automatic PiKVM TOTP from macOS Keychain | Complete, hardware verified |
 | M5 | Slack manual availability skill and scheduling | Implemented; real multi-KVM validation pending |
 | M5.5 | Local operations dashboard | Implemented; automated checks pass |
-| M6 | Slack reading and summarization | Planned |
+| M6 | Slack inbox triage | Sidebar tier implemented; conversation-level triage deferred |
+| M6.5 | Explicit PiKVM WebRTC meeting capture | Implemented; real audio validation pending |
+| M6.6 | Diarized meeting intelligence (Deepgram or OpenAI transcription, dashboard panel, `meeting validate`) | Implemented; real audio/provider validation pending — run `pikvm-agent meeting validate --kvm nbc_kvm` |
 | M7 | Development-tool skills | Planned |
 | M8 | Higher-level work agent | Planned |
 
@@ -140,6 +142,62 @@ Implemented:
 Automated tests, `ruff`, `ruff format`, and `mypy --strict` pass. The read-only panels and the live
 screenshot path were exercised against the real local environment. Driving a real Slack transition
 from the dashboard is left to the user, since it sends HID to a work computer.
+
+## Milestone 6: Slack inbox triage — sidebar tier implemented
+
+Implemented:
+
+- `slack triage --kvm NAME` and `--all-kvms`, reading Slack's visible unread sidebar;
+- a dedicated strict perception schema with no field capable of holding message text, read through a
+  new reusable `OpenAIScreenAnalyzer.perceive` entry point;
+- a positional policy that permits input only until Slack is foreground, so conversations are out of
+  reach by construction without brittle label matching that would block a badged Dock icon;
+- separate foregrounding and reading phases, the reading phase having no executor attached;
+- mention / direct-message / other-unread ranking, muted entries dropped, clipped-sidebar reporting;
+- counts-only JSONL logging that never records conversation names.
+
+Deliberately deferred: opening conversations to judge whether a message is a question, a blocker, or
+an approval request. That marks conversations read, which is not reliably reversible and would destroy
+the unread signal triage reports. Revisit only with an explicit decision about that side effect.
+
+Not yet run against real hardware.
+
+## Milestone 6.5: Explicit PiKVM meeting capture — implementation complete
+
+Implemented:
+
+- explicit `meeting start --kvm NAME`, `meeting status`, and `meeting stop` commands;
+- a separate authenticated PiKVM Janus/WebRTC viewer requesting incoming HDMI audio only, with
+  `audio=true`, `mic=false`, `camera=false`, a receive-only audio transceiver, and no local media
+  source;
+- one protected Mac-local recorder across all profiles, so recordings from different KVMs cannot
+  mix and selector-free stop/status commands remain unambiguous;
+- detached capture with first-audio-frame readiness, private segmented Ogg/Opus artifacts, bounded
+  shutdown, disconnect preservation, and resumable processing;
+- atomic state and artifact coordination, sanitized failures, and no transcript/audio telemetry;
+- provider and hardware mocks proving the recorder has no Mac-microphone path.
+
+The feature does not detect meetings, open or join calls, use application APIs, or add anything to
+the remote machine. Real PiKVM HDMI-audio validation is intentionally left for the user.
+
+## Milestone 6.6: Diarized meeting intelligence — implementation complete
+
+Implemented:
+
+- a transcription-provider protocol with an OpenAI diarized implementation and preserved part/
+  segment timestamps;
+- anonymous, deterministic `Speaker N` labels, without voice enrollment or fabricated names;
+- strict structured extraction for summaries, action items, ownership, decisions, blockers/risks,
+  questions, references, and follow-ups;
+- per-PiKVM textual work identity, snapshotted into each recording and used only for action-item
+  ownership;
+- conservative local ownership validation: exact named assignments may be ours, contextual
+  references may be only possibly ours, and ambiguity remains unknown;
+- a deterministic evidence-linked Markdown report and resumable protected intermediates under a
+  stable private Mac-local meeting directory.
+
+Automatic detection, task-database insertion, and message follow-up automation remain out of scope.
+Real meeting audio, diarization, and ownership output still require the documented manual validation.
 
 ## Later workflow milestones
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from collections.abc import Callable
@@ -13,7 +14,16 @@ from work_agent.agent.config import (
     AgentSettings,
 )
 from work_agent.agent.debug import DebugArtifacts
-from work_agent.agent.errors import AgentError
+from work_agent.agent.errors import (
+    AgentError,
+    PlannerAuthenticationError,
+    PlannerNetworkError,
+    PlannerPermissionError,
+    PlannerRateLimitError,
+    PlannerServerError,
+    PlannerStructuredOutputError,
+    PlannerTimeoutError,
+)
 from work_agent.agent.executor import ActionExecutor
 from work_agent.agent.models import (
     ActionProposal,
@@ -32,7 +42,9 @@ from work_agent.agent.models import (
     PolicyDecision,
     PolicyDecisionKind,
     RequestUserAction,
+    ScrollAction,
     SessionTelemetry,
+    StopCode,
     action_fingerprint,
     action_summary,
     is_hid_action,
@@ -46,7 +58,15 @@ from work_agent.agent.screen_change import (
     ScreenSettleDetector,
     signature,
 )
-from work_agent.pikvm import PiKVMError, Screenshot
+from work_agent.diagnostics import log_exception
+from work_agent.pikvm import (
+    PiKVMAuthenticationError,
+    PiKVMConnectionError,
+    PiKVMError,
+    PiKVMTimeoutError,
+    PiKVMTotpError,
+    Screenshot,
+)
 from work_agent.vision import (
     ActionVerification,
     AnalysisOptions,
@@ -60,6 +80,55 @@ from work_agent.vision import (
     VisionError,
     normalized_to_pixel,
 )
+from work_agent.vision.errors import (
+    VisionAuthenticationError,
+    VisionNetworkError,
+    VisionPermissionError,
+    VisionRateLimitError,
+    VisionServerError,
+    VisionStructuredOutputError,
+    VisionTimeoutError,
+)
+
+_LOGGER = logging.getLogger(__name__)
+
+
+def classify_exception(exc: BaseException) -> StopCode:
+    """Map a controller-stopping exception to the environment it points at."""
+
+    if isinstance(exc, (PiKVMConnectionError, PiKVMTimeoutError)):
+        return StopCode.PIKVM_UNREACHABLE
+    if isinstance(exc, (PiKVMAuthenticationError, PiKVMTotpError)):
+        return StopCode.PIKVM_AUTH_FAILED
+    if isinstance(exc, (VisionStructuredOutputError, PlannerStructuredOutputError)):
+        return StopCode.MODEL_OUTPUT_INVALID
+    if isinstance(
+        exc,
+        (
+            VisionAuthenticationError,
+            VisionPermissionError,
+            VisionRateLimitError,
+            VisionNetworkError,
+            VisionTimeoutError,
+            VisionServerError,
+            PlannerAuthenticationError,
+            PlannerPermissionError,
+            PlannerRateLimitError,
+            PlannerNetworkError,
+            PlannerTimeoutError,
+            PlannerServerError,
+        ),
+    ):
+        return StopCode.MODEL_PROVIDER_ERROR
+    return StopCode.INTERNAL_ERROR
+
+
+def _sanitized_exception_summary(exc: BaseException) -> str:
+    # Project exception classes carry sanitized messages by construction. Anything else
+    # (OSError, a stray ValueError) may not, so only its class name is surfaced.
+    if isinstance(exc, (AgentError, VisionError, PiKVMError)) and str(exc).strip():
+        return str(exc).strip()
+    return f"Unexpected local error ({type(exc).__name__})."
 
 
 @dataclass(frozen=True, slots=True)
@@ -156,7 +225,9 @@ class AgentController:
         ) = None,
         clock: Callable[[], float] = time.monotonic,
         now: Callable[[], datetime] | None = None,
+        sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
+        self._sleeper = sleeper
         self._capture = capture
         self._analyzer = analyzer
         self._planner = planner
@@ -182,6 +253,13 @@ class AgentController:
             raise ValueError("agent objective must not be empty")
 
         session_id = uuid.uuid4().hex
+        _LOGGER.info(
+            "Session %s starting: max_steps=%d timeout=%.0fs dry_run=%s",
+            session_id,
+            self._options.max_steps,
+            self._options.timeout_seconds,
+            self._options.dry_run,
+        )
         started_at = self._now()
         started_clock = self._clock()
         counters = _Counters()
@@ -190,6 +268,10 @@ class AgentController:
         previous_proposal: ActionProposal | None = None
         current: Screenshot | None = None
         no_change_steps = 0
+        reobserved_after_uncertainty = False
+        verification_recoveries = 0
+        unverified_fingerprint: str | None = None
+        planner_feedback: str | None = None
 
         try:
             current = self._capture()
@@ -199,6 +281,7 @@ class AgentController:
                 if self._expired(started_clock):
                     return self._finish(
                         status=AgentFinalStatus.PAUSED,
+                        stop_code=StopCode.RUNTIME_LIMIT,
                         summary="Agent runtime limit reached.",
                         state=ControllerState.PAUSED,
                         objective=normalized_objective,
@@ -230,6 +313,7 @@ class AgentController:
                             started_clock,
                             counters,
                             history,
+                            stop_code=StopCode.VERIFICATION_MISSING,
                         )
                     if self._verification_override is not None:
                         overridden = self._verification_override(analysis, verification)
@@ -242,21 +326,65 @@ class AgentController:
                         f"Verification: {verification.status.value} "
                         f"(confidence {verification.confidence:.2f})"
                     )
-                    if (
-                        verification.status is not VerificationStatus.SUCCESS
-                        or not verification.expected_outcome_observed
-                        or verification.confidence < self._settings.min_action_confidence
-                    ):
+                    _LOGGER.info(
+                        "Session %s step %d: verification %s (confidence %.2f, expected=%s)",
+                        session_id,
+                        len(history),
+                        verification.status.value,
+                        verification.confidence,
+                        verification.expected_outcome_observed,
+                    )
+                    verified = (
+                        verification.status is VerificationStatus.SUCCESS
+                        and verification.expected_outcome_observed
+                        and verification.confidence >= self._settings.min_action_confidence
+                    )
+                    if not verified:
                         counters.verification_failures += 1
-                        return self._failure(
-                            "Previous action was not verified; it will not be repeated.",
-                            normalized_objective,
-                            session_id,
-                            started_at,
-                            started_clock,
-                            counters,
-                            history,
+                        # Ladder, rung 1: an UNCERTAIN verdict often means the UI was still
+                        # animating when the settled frame was taken. Look again once, later.
+                        if (
+                            verification.status is not VerificationStatus.FAILURE
+                            and not reobserved_after_uncertainty
+                        ):
+                            reobserved_after_uncertainty = True
+                            self._event_sink(
+                                "Verification uncertain; re-observing once after a short wait."
+                            )
+                            self._sleeper(self._settings.verification_reobserve_delay_seconds)
+                            current = self._capture()
+                            continue
+                        # Rung 2: hand the verdict to the planner, which may take a different
+                        # route. The unverified action itself may not be proposed again.
+                        if verification_recoveries >= self._settings.max_verification_recoveries:
+                            return self._failure(
+                                "Previous action was not verified; it will not be repeated.",
+                                normalized_objective,
+                                session_id,
+                                started_at,
+                                started_clock,
+                                counters,
+                                history,
+                                stop_code=StopCode.VERIFICATION_FAILED,
+                            )
+                        verification_recoveries += 1
+                        unverified_fingerprint = action_fingerprint(previous_execution.action)
+                        planner_feedback = (
+                            "The previous action could not be verified "
+                            f"({verification.status.value}: {verification.evidence}). Do not "
+                            "assume it took effect and do not repeat it blindly: re-assess the "
+                            "current screen and choose a different route, or finish / "
+                            "request_user if the objective is already met or blocked."
                         )
+                        self._event_sink(
+                            "Verification not confirmed; re-planning from the current screen "
+                            f"(recovery {verification_recoveries} of "
+                            f"{self._settings.max_verification_recoveries})."
+                        )
+                    else:
+                        unverified_fingerprint = None
+                        planner_feedback = None
+                    reobserved_after_uncertainty = False
                     planner_previous_execution = previous_execution
                     planner_previous_verification = verification
                     previous_execution = None
@@ -265,6 +393,7 @@ class AgentController:
                 if len(history) >= self._options.max_steps:
                     return self._finish(
                         status=AgentFinalStatus.PAUSED,
+                        stop_code=StopCode.STEP_LIMIT,
                         summary="Maximum step count reached after verifying the last action.",
                         state=ControllerState.PAUSED,
                         objective=normalized_objective,
@@ -275,10 +404,12 @@ class AgentController:
                         history=history,
                     )
 
-                unsafe_reason = self._unsafe_reason(analysis)
-                if unsafe_reason is not None:
+                unsafe = self._unsafe_reason(analysis)
+                if unsafe is not None:
+                    unsafe_reason, unsafe_code = unsafe
                     return self._finish(
                         status=AgentFinalStatus.PAUSED,
+                        stop_code=unsafe_code,
                         summary=unsafe_reason,
                         state=ControllerState.PAUSED,
                         objective=normalized_objective,
@@ -301,7 +432,9 @@ class AgentController:
                     previous_verification=planner_previous_verification,
                     history=self._summaries(history),
                     remaining_steps=self._options.max_steps - len(history),
+                    feedback=planner_feedback,
                 )
+                planner_feedback = None
                 counters.planner_usage += planning.usage
                 counters.retries += planning.retries
                 counters.model_latency_seconds += planning.latency_seconds
@@ -316,6 +449,7 @@ class AgentController:
                 if self._expired(started_clock):
                     return self._finish(
                         status=AgentFinalStatus.PAUSED,
+                        stop_code=StopCode.RUNTIME_LIMIT,
                         summary="Agent runtime limit reached before action execution.",
                         state=ControllerState.PAUSED,
                         objective=normalized_objective,
@@ -325,9 +459,25 @@ class AgentController:
                         counters=counters,
                         history=history,
                     )
+                if (
+                    unverified_fingerprint is not None
+                    and is_hid_action(proposal.action)
+                    and action_fingerprint(proposal.action) == unverified_fingerprint
+                ):
+                    return self._failure(
+                        "The planner proposed repeating the unverified action; it was not sent.",
+                        normalized_objective,
+                        session_id,
+                        started_at,
+                        started_clock,
+                        counters,
+                        history,
+                        stop_code=StopCode.VERIFICATION_FAILED,
+                    )
                 if proposal.confidence < self._settings.min_action_confidence:
                     return self._finish(
                         status=AgentFinalStatus.PAUSED,
+                        stop_code=StopCode.PLANNER_LOW_CONFIDENCE,
                         summary="Planner confidence is below the configured action threshold.",
                         state=ControllerState.PAUSED,
                         objective=normalized_objective,
@@ -351,6 +501,15 @@ class AgentController:
                         inferred_risk=decision.inferred_risk,
                     )
                 self._event_sink(f"Policy: {decision.decision.value} — {decision.reason}")
+                _LOGGER.info(
+                    "Session %s step %d: %s -> policy %s (confidence %.2f, risk %s)",
+                    session_id,
+                    step_number,
+                    action_summary(proposal.action),
+                    decision.decision.value,
+                    proposal.confidence,
+                    proposal.risk.value,
+                )
                 self._debug.save_proposal(step_number, proposal, decision)
                 step = AgentStep(
                     step_number=step_number,
@@ -377,9 +536,11 @@ class AgentController:
                                 started_clock,
                                 counters,
                                 history,
+                                stop_code=StopCode.COMPLETION_UNVERIFIED,
                             )
                     return self._finish(
                         status=AgentFinalStatus.SUCCESS,
+                        stop_code=StopCode.COMPLETED,
                         summary=proposal.action.summary,
                         state=ControllerState.FINISHED,
                         objective=normalized_objective,
@@ -392,6 +553,7 @@ class AgentController:
                 if isinstance(proposal.action, RequestUserAction):
                     return self._finish(
                         status=AgentFinalStatus.PAUSED,
+                        stop_code=StopCode.USER_ASSISTANCE_REQUESTED,
                         summary=proposal.action.message,
                         state=ControllerState.PAUSED,
                         objective=normalized_objective,
@@ -410,6 +572,7 @@ class AgentController:
                         started_clock,
                         counters,
                         history,
+                        stop_code=StopCode.POLICY_DENIED,
                     )
                 if self._appears_stuck(history):
                     return self._failure(
@@ -420,10 +583,12 @@ class AgentController:
                         started_clock,
                         counters,
                         history,
+                        stop_code=StopCode.STUCK_REPEATED_ACTION,
                     )
                 if self._options.dry_run:
                     return self._finish(
                         status=AgentFinalStatus.DRY_RUN,
+                        stop_code=StopCode.DRY_RUN,
                         summary=f"Dry run: would {action_summary(proposal.action)}.",
                         state=ControllerState.FINISHED,
                         objective=normalized_objective,
@@ -444,6 +609,7 @@ class AgentController:
                     ):
                         return self._finish(
                             status=AgentFinalStatus.PAUSED,
+                            stop_code=StopCode.APPROVAL_DENIED,
                             summary="User rejected or did not provide approval.",
                             state=ControllerState.PAUSED,
                             objective=normalized_objective,
@@ -458,6 +624,7 @@ class AgentController:
                     if not self._approval.confirm_step(proposal=proposal, policy=decision):
                         return self._finish(
                             status=AgentFinalStatus.PAUSED,
+                            stop_code=StopCode.STEP_CANCELLED,
                             summary="Step execution was cancelled by the user.",
                             state=ControllerState.PAUSED,
                             objective=normalized_objective,
@@ -494,6 +661,13 @@ class AgentController:
                 if execution.hid_action:
                     counters.hid_actions += 1
                 self._event_sink(f"Transport: {execution.transport_status.value}")
+                _LOGGER.info(
+                    "Session %s step %d: transport %s%s",
+                    session_id,
+                    step_number,
+                    execution.transport_status.value,
+                    f" ({execution.error_code})" if execution.error_code else "",
+                )
                 if execution.transport_status is ExecutionTransportStatus.FAILED:
                     return self._failure(
                         execution.sanitized_error or "The action could not be sent.",
@@ -503,6 +677,7 @@ class AgentController:
                         started_clock,
                         counters,
                         history,
+                        stop_code=StopCode.TRANSPORT_FAILED,
                     )
 
                 self._transition(ControllerState.WAITING_FOR_SCREEN)
@@ -516,6 +691,7 @@ class AgentController:
                     f"Screen settle: changed={'yes' if settled.changed else 'no'}, "
                     f"stable={'yes' if settled.stable else 'no'}, "
                     f"difference={settled.difference:.4f}, "
+                    f"changed_cells={settled.changed_fraction:.4f}, "
                     f"timed_out={'yes' if settled.timed_out else 'no'}"
                 )
                 if settled.changed:
@@ -531,6 +707,7 @@ class AgentController:
                         started_clock,
                         counters,
                         history,
+                        stop_code=StopCode.STUCK_NO_SCREEN_CHANGE,
                     )
                 current = settled.screenshot
                 previous_execution = execution
@@ -538,6 +715,7 @@ class AgentController:
         except KeyboardInterrupt:
             return self._finish(
                 status=AgentFinalStatus.INTERRUPTED,
+                stop_code=StopCode.INTERRUPTED,
                 summary="Agent interrupted; no further HID actions were issued.",
                 state=ControllerState.PAUSED,
                 objective=normalized_objective,
@@ -548,14 +726,19 @@ class AgentController:
                 history=history,
             )
         except (AgentError, VisionError, PiKVMError, OSError, ValueError) as exc:
+            stop_code = classify_exception(exc)
+            log_exception(
+                _LOGGER, f"Controller session {session_id} stopped ({stop_code.value})", exc
+            )
             return self._failure(
-                str(exc),
+                _sanitized_exception_summary(exc),
                 normalized_objective,
                 session_id,
                 started_at,
                 started_clock,
                 counters,
                 history,
+                stop_code=stop_code,
             )
 
     def _observe(
@@ -595,25 +778,35 @@ class AgentController:
         counters.model_latency_seconds += observation.analysis.latency_seconds
         return observation
 
-    def _unsafe_reason(self, analysis: ScreenAnalysis) -> str | None:
+    def _unsafe_reason(self, analysis: ScreenAnalysis) -> tuple[str, StopCode] | None:
         if analysis.confidence < self._settings.min_action_confidence:
-            return "Screen confidence is below the configured action threshold."
+            return (
+                "Screen confidence is below the configured action threshold.",
+                StopCode.SCREEN_LOW_CONFIDENCE,
+            )
         if not analysis.safe_to_continue:
-            return analysis.stop_reason or "The current screen is unsafe to continue from."
+            return (
+                analysis.stop_reason or "The current screen is unsafe to continue from.",
+                StopCode.SCREEN_UNSAFE,
+            )
         return None
 
     @staticmethod
     def _target_coordinates(proposal: ActionProposal, analysis: ScreenAnalysis) -> str:
         action = proposal.action
-        if not isinstance(
+        if isinstance(action, ScrollAction) and action.element_id is not None:
+            target_id: str = action.element_id
+        elif isinstance(
             action,
             (ClickElementAction, DoubleClickElementAction, MoveMouseAction),
         ):
+            target_id = action.element_id
+        else:
             return ""
         elements = ([analysis.target] if analysis.target is not None else []) + list(
             analysis.relevant_elements
         )
-        element = next((item for item in elements if item.id == action.element_id), None)
+        element = next((item for item in elements if item.id == target_id), None)
         if element is None or element.click_point is None:
             return "target=unresolved "
         point = element.click_point
@@ -677,9 +870,12 @@ class AgentController:
         started_clock: float,
         counters: _Counters,
         history: list[AgentStep],
+        *,
+        stop_code: StopCode,
     ) -> AgentSessionResult:
         return self._finish(
             status=AgentFinalStatus.FAILED,
+            stop_code=stop_code,
             summary=summary or "Agent stopped after a sanitized controller failure.",
             state=ControllerState.FAILED,
             objective=objective,
@@ -694,6 +890,7 @@ class AgentController:
         self,
         *,
         status: AgentFinalStatus,
+        stop_code: StopCode,
         summary: str,
         state: ControllerState,
         objective: str,
@@ -726,8 +923,21 @@ class AgentController:
             total_model_latency_seconds=counters.model_latency_seconds,
             runtime_seconds=max(0.0, self._clock() - started_clock),
         )
+        _LOGGER.info(
+            "Session %s finished: status=%s stop_code=%s steps=%d hid=%d vision_calls=%d "
+            "planner_calls=%d runtime=%.1fs",
+            session_id,
+            status.value,
+            stop_code.value,
+            telemetry.steps,
+            telemetry.hid_actions,
+            telemetry.vision_calls,
+            telemetry.planner_calls,
+            telemetry.runtime_seconds,
+        )
         return AgentSessionResult(
             status=status,
+            stop_code=stop_code,
             summary=summary,
             telemetry=telemetry,
             history=list(history),

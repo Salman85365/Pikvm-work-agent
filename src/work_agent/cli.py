@@ -2,11 +2,18 @@ from __future__ import annotations
 
 import argparse
 import getpass
+import logging
 import sys
 from collections.abc import Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
+from work_agent.agenda.cli import (
+    add_agenda_parser,
+    execute_agenda_command,
+    format_agenda_batch,
+)
+from work_agent.agenda.errors import AgendaError
 from work_agent.agent.cli import (
     add_agent_parsers,
     execute_agent_command,
@@ -18,6 +25,9 @@ from work_agent.agent.pikvm_session import PiKVMSession
 from work_agent.auth_cli import add_auth_parser, execute_auth_command
 from work_agent.dashboard.cli import add_dashboard_parser, execute_dashboard_command
 from work_agent.dashboard.errors import DashboardError
+from work_agent.diagnostics import configure_logging
+from work_agent.meeting.cli import add_meeting_parser, execute_meeting_command
+from work_agent.meeting.errors import MeetingError
 from work_agent.pikvm import (
     MouseButton,
     PiKVMError,
@@ -26,12 +36,15 @@ from work_agent.pikvm import (
     TotpProvider,
     build_totp_provider,
 )
+from work_agent.profiles_cli import add_profiles_parser, execute_profiles_command
 from work_agent.schedule.cli import add_schedule_parser, execute_schedule_command
 from work_agent.schedule.errors import ScheduleError
 from work_agent.slack.cli import (
     add_slack_parser,
     execute_slack_command,
+    execute_slack_triage_command,
     format_availability_batch,
+    format_triage_batch,
 )
 from work_agent.slack.errors import SlackAvailabilityError
 from work_agent.vision import (
@@ -47,6 +60,8 @@ from work_agent.vision import (
     normalized_to_pixel,
     save_analysis_overlay,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 
 def _default_screenshot_path() -> Path:
@@ -257,8 +272,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_analysis_arguments(analyze_screen)
     add_auth_parser(subparsers)
+    add_profiles_parser(subparsers)
     add_agent_parsers(subparsers)
     add_slack_parser(subparsers)
+    add_agenda_parser(subparsers)
+    add_meeting_parser(subparsers)
     add_schedule_parser(subparsers)
     add_dashboard_parser(subparsers)
     return parser
@@ -283,6 +301,10 @@ def _validate_command(parser: argparse.ArgumentParser, args: argparse.Namespace)
             "--profile is not used by Slack workflows; pass --kvm or use the scheduled "
             "all-KVM flow."
         )
+    if args.command == "calendar" and args.profile is not None:
+        parser.error("--profile is not used by calendar workflows; pass --kvm or --all-kvms.")
+    if args.command == "meeting" and args.profile is not None:
+        parser.error("--profile is not used by meeting capture; pass --kvm to meeting start.")
     if args.command == "dashboard" and args.profile is not None:
         parser.error("--profile is not used by the dashboard; select the KVM in the interface.")
     if args.command == "type" and not args.text:
@@ -423,6 +445,8 @@ def run(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     _validate_command(parser, args)
+    configure_logging()
+    _LOGGER.info("pikvm-agent %s", _command_label(args))
 
     if args.command == "dashboard":
         try:
@@ -436,12 +460,41 @@ def run(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "slack":
         try:
+            if args.slack_command == "triage":
+                triage_result = execute_slack_triage_command(args)
+                print(format_triage_batch(triage_result))
+                return 0 if triage_result.success else 1
             availability_result = execute_slack_command(args)
         except (SlackAvailabilityError, PiKVMError, OSError, ValueError) as exc:
             print(f"Error: {exc}", file=sys.stderr)
             return 1
         print(format_availability_batch(availability_result))
         return 0 if availability_result.success else 1
+
+    if args.command == "calendar":
+        try:
+            agenda_result = execute_agenda_command(args)
+        except (AgendaError, PiKVMError, VisionError, OSError, ValueError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        print(format_agenda_batch(agenda_result))
+        return 0 if agenda_result.success else 1
+
+    if args.command == "meeting":
+        try:
+            meeting_output, exit_code = execute_meeting_command(args)
+        except KeyboardInterrupt:
+            print(
+                "Meeting command interrupted; run `pikvm-agent meeting status` before retrying.",
+                file=sys.stderr,
+            )
+            return 130
+        except (MeetingError, PiKVMError, OSError, ValueError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        if meeting_output:
+            print(meeting_output)
+        return exit_code
 
     if args.command == "schedule":
         try:
@@ -487,6 +540,14 @@ def run(argv: Sequence[str] | None = None) -> int:
         print(auth_result)
         return 0
 
+    if args.command == "profiles":
+        try:
+            print(execute_profiles_command(args))
+        except (PiKVMError, OSError, ValueError) as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 1
+        return 0
+
     try:
         settings = PiKVMSettings.from_env(args.profile)
         with PiKVMSession(settings, totp_provider=_totp_provider(settings)) as session:
@@ -497,6 +558,23 @@ def run(argv: Sequence[str] | None = None) -> int:
 
     print(result)
     return 0
+
+
+def _command_label(args: argparse.Namespace) -> str:
+    parts = [str(args.command)]
+    for attribute in (
+        "slack_command",
+        "availability_action",
+        "schedule_command",
+        "schedule_action",
+        "meeting_command",
+        "agenda_command",
+        "auth_command",
+    ):
+        value = getattr(args, attribute, None)
+        if isinstance(value, str):
+            parts.append(value)
+    return " ".join(parts)
 
 
 def main() -> None:

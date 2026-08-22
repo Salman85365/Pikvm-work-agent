@@ -23,18 +23,18 @@
       </span>
     </div>
 
-    <div class="topbar__status">
-      <span id="required-pill" class="pill" role="status">
+    <div class="topbar__status" aria-label="Current automation status">
+      <button id="required-pill" class="pill status-button" type="button" data-goto="availability">
         <span class="pill__icon" aria-hidden="true">•</span><span class="pill__text">—</span>
-      </span>
-      <span id="schedule-pill" class="pill pill--muted" role="status">
+      </button>
+      <button id="schedule-pill" class="pill pill--muted status-button" type="button" data-goto="schedule">
         <span class="pill__icon" aria-hidden="true">•</span><span class="pill__text">Loading…</span>
-      </span>
+      </button>
     </div>
 
     <div class="topbar__tools">
-      <label class="inline-field">
-        <span class="visually-hidden">History range</span>
+      <label class="toolbar-field">
+        <span class="toolbar-field__label">History</span>
         <select id="range-select" class="control control--compact">
           <option value="1">24 hours</option>
           <option value="7" selected>7 days</option>
@@ -44,89 +44,122 @@
       </label>
       <button id="refresh" class="ghost-button" type="button">Refresh</button>
       <button id="theme-toggle" class="ghost-button" type="button" aria-label="Switch colour theme">
+        <span class="toolbar-field__label">Theme</span>
         <span id="theme-label">Auto</span>
       </button>
     </div>
   </header>
 
-  <nav class="sidebar" aria-label="Skills">
-    <div class="navgroup">
-      <button class="navitem is-active" type="button" data-section="overview">
-        <span class="navitem__label">Overview</span>
-      </button>
-    </div>
+  <nav class="sidebar" aria-label="Dashboard sections">
+    <label class="mobile-nav" for="section-select">
+      <span class="mobile-nav__label">Section</span>
+      <select id="section-select" class="control">
+        <option value="overview">Overview</option>
+        <optgroup label="Run">
+          <option value="availability">Availability</option>
+          <option value="triage">Inbox &amp; triage</option>
+          <option value="agenda">Today's meetings</option>
+          <option value="meetings">Meeting recorder</option>
+          <option value="screen">Remote screen</option>
+        </optgroup>
+        <optgroup label="Manage">
+          <option value="profiles">Profiles</option>
+          <option value="schedule">Schedule</option>
+        </optgroup>
+        <optgroup label="Review">
+          <option value="activity">History</option>
+        </optgroup>
+      </select>
+    </label>
 
-    <div class="navgroup">
-      <h2 class="navgroup__title">Slack</h2>
-      <button class="navitem" type="button" data-section="availability">
-        <span class="navitem__label">Availability</span>
-        <span class="navitem__badge" title="Autonomy level 2 — local, reversible">L2</span>
-      </button>
-      <button class="navitem is-planned" type="button" disabled data-planned="M6">
-        <span class="navitem__label">Inbox &amp; triage</span>
-        <span class="navitem__milestone">M6</span>
-      </button>
-      <button class="navitem is-planned" type="button" disabled data-planned="M7">
-        <span class="navitem__label">Reply drafting</span>
-        <span class="navitem__milestone">M7</span>
-      </button>
-    </div>
+    <div class="sidebar__nav">
+      <div class="navgroup navgroup--primary">
+        <h2 class="navgroup__title">Dashboard</h2>
+        <button class="navitem is-active" type="button" data-section="overview">
+          <span class="navitem__label">Overview</span>
+        </button>
+      </div>
 
-    <div class="navgroup">
-      <h2 class="navgroup__title">Development</h2>
-      <button class="navitem is-planned" type="button" disabled data-planned="M10">
-        <span class="navitem__label">Environment inspect</span>
-        <span class="navitem__milestone">M10</span>
-      </button>
-      <button class="navitem is-planned" type="button" disabled data-planned="M11">
-        <span class="navitem__label">Terminal skills</span>
-        <span class="navitem__milestone">M11</span>
-      </button>
-      <button class="navitem is-planned" type="button" disabled data-planned="M12">
-        <span class="navitem__label">PR review</span>
-        <span class="navitem__milestone">M12</span>
-      </button>
-    </div>
+      <div class="navgroup">
+        <h2 class="navgroup__title">Run</h2>
+        <button class="navitem" type="button" data-section="availability">
+          <span class="navitem__label">Availability</span>
+          <span class="navitem__badge navitem__badge--acts" title="Can change only your manual Slack availability">Acts</span>
+        </button>
+        <button class="navitem" type="button" data-section="triage">
+          <span class="navitem__label">Inbox &amp; triage</span>
+          <span class="navitem__badge" title="Reads visible state only">Observe</span>
+        </button>
+        <button class="navitem" type="button" data-section="agenda">
+          <span class="navitem__label">Today's meetings</span>
+          <span class="navitem__badge" title="Reads visible state only">Observe</span>
+        </button>
+        <button class="navitem" type="button" data-section="meetings">
+          <span class="navitem__label">Meeting recorder</span>
+          <span id="nav-meetings-dot" class="navitem__dot" aria-hidden="true"></span>
+        </button>
+        <button class="navitem" type="button" data-section="screen">
+          <span class="navitem__label">Remote screen</span>
+          <span class="navitem__badge" title="Reads visible state only">Observe</span>
+        </button>
+      </div>
 
-    <div class="navgroup">
-      <h2 class="navgroup__title">Work</h2>
-      <button class="navitem is-planned" type="button" disabled data-planned="M9">
-        <span class="navitem__label">Daily brief</span>
-        <span class="navitem__milestone">M9</span>
-      </button>
-      <button class="navitem is-planned" type="button" disabled data-planned="M14">
-        <span class="navitem__label">Task queue</span>
-        <span class="navitem__milestone">M14</span>
-      </button>
-    </div>
+      <div class="navgroup">
+        <h2 class="navgroup__title">Manage</h2>
+        <button class="navitem" type="button" data-section="profiles">
+          <span class="navitem__label">Profiles</span>
+          <span id="nav-profiles-count" class="navitem__count" aria-hidden="true"></span>
+        </button>
+        <button class="navitem" type="button" data-section="schedule">
+          <span class="navitem__label">Schedule</span>
+          <span id="nav-schedule-dot" class="navitem__dot" aria-hidden="true"></span>
+        </button>
+      </div>
 
-    <div class="navgroup">
-      <h2 class="navgroup__title">System</h2>
-      <button class="navitem" type="button" data-section="schedule">
-        <span class="navitem__label">Schedule</span>
-      </button>
-      <button class="navitem" type="button" data-section="activity">
-        <span class="navitem__label">Activity</span>
-      </button>
-      <button class="navitem" type="button" data-section="screen">
-        <span class="navitem__label">Remote screen</span>
-        <span class="navitem__badge" title="Autonomy level 0 — observe only">L0</span>
-      </button>
-    </div>
+      <div class="navgroup">
+        <h2 class="navgroup__title">Review</h2>
+        <button class="navitem" type="button" data-section="activity">
+          <span class="navitem__label">History</span>
+        </button>
+      </div>
 
-    <p class="sidebar__foot">
-      Planned skills follow <code>docs/ROADMAP_UPDATED_LONGTERM.md</code>.
-    </p>
+      <details class="coming-later">
+        <summary>Coming later</summary>
+        <div class="coming-later__items">
+          <span>Reply drafting</span>
+          <span>Daily brief</span>
+          <span>Environment inspection</span>
+          <span>Terminal skills</span>
+          <span>Pull request review</span>
+          <span>Task queue</span>
+        </div>
+      </details>
+    </div>
   </nav>
 
   <main id="content" class="content">
+
+    <header class="viewbar">
+      <div>
+        <h1 id="view-title" class="viewbar__title" tabindex="-1">Overview</h1>
+        <p id="view-summary" class="viewbar__summary">Fleet health and recent availability work.</p>
+      </div>
+      <span id="last-updated" class="viewbar__updated">Loading data…</span>
+    </header>
+
+    <div id="data-notices" class="notice-stack" aria-live="polite" hidden></div>
+
+    <div id="fleet-alerts" class="alert-stack" role="alert" aria-live="assertive" hidden></div>
 
     <section class="fleet" aria-labelledby="fleet-title">
       <div class="section__head">
         <h2 id="fleet-title" class="section__title">Work environments</h2>
         <span class="section__hint" id="fleet-hint"></span>
       </div>
-      <div id="fleet" class="fleet__grid"></div>
+      <div id="fleet" class="fleet__grid" aria-busy="true">
+        <div class="kvmcard kvmcard--skeleton" aria-hidden="true"><span class="skeleton skeleton--title"></span><span class="skeleton skeleton--line"></span><span class="skeleton skeleton--line skeleton--short"></span></div>
+        <div class="kvmcard kvmcard--skeleton" aria-hidden="true"><span class="skeleton skeleton--title"></span><span class="skeleton skeleton--line"></span><span class="skeleton skeleton--line skeleton--short"></span></div>
+      </div>
     </section>
 
     <!-- Overview -->
@@ -161,22 +194,42 @@
           </dl>
         </section>
 
-        <section class="card card--span5" aria-labelledby="cats-title">
+        <section class="card card--span5" aria-labelledby="glance-title">
           <div class="card__head">
-            <h2 id="cats-title" class="card__title">Where runs stop</h2>
-            <button class="linkish" type="button" data-toggle-table="cats">Table</button>
+            <h2 id="glance-title" class="card__title">Schedule at a glance</h2>
+            <button class="linkish" type="button" data-goto="schedule">Open schedule</button>
           </div>
-          <div id="cats" class="bars"></div>
-          <div id="cats-table" class="tablewrap" hidden></div>
+          <div class="kv">
+            <div class="kv__row">
+              <span class="kv__key">Automation</span>
+              <span class="kv__val" id="glance-health">—</span>
+            </div>
+            <div class="kv__row">
+              <span class="kv__key">Slack should be</span>
+              <span class="kv__val" id="glance-desired">—</span>
+            </div>
+            <div class="kv__row">
+              <span class="kv__key">Next transition</span>
+              <span class="kv__val" id="glance-next">—</span>
+            </div>
+            <div class="kv__row">
+              <span class="kv__key">Last recorded run</span>
+              <span class="kv__val" id="glance-last-run">—</span>
+            </div>
+            <div class="kv__row">
+              <span class="kv__key">Profiles</span>
+              <span class="kv__val" id="glance-profiles">—</span>
+            </div>
+          </div>
         </section>
 
-        <section class="card card--span12" aria-labelledby="recent-title">
+        <section class="card card--span7" aria-labelledby="recent-title">
           <div class="card__head">
             <h2 id="recent-title" class="card__title">Recent runs</h2>
-            <button class="linkish" type="button" data-goto="activity">Full activity</button>
+            <button class="linkish" type="button" data-goto="activity">Full history</button>
           </div>
           <div class="tablewrap">
-            <table class="table">
+            <table class="table table--responsive table--history">
               <thead>
                 <tr>
                   <th scope="col">When</th>
@@ -185,11 +238,21 @@
                   <th scope="col">Observed</th>
                   <th scope="col">Outcome</th>
                   <th scope="col">Detail</th>
+                  <th scope="col">Effort</th>
                 </tr>
               </thead>
               <tbody id="recent-body"></tbody>
             </table>
           </div>
+        </section>
+
+        <section class="card card--span5" aria-labelledby="cats-title">
+          <div class="card__head">
+            <h2 id="cats-title" class="card__title">Where runs stop</h2>
+            <button class="linkish" type="button" data-toggle-table="cats">Table</button>
+          </div>
+          <div id="cats" class="bars"></div>
+          <div id="cats-table" class="tablewrap" hidden></div>
         </section>
       </div>
     </div>
@@ -200,7 +263,7 @@
         <section class="card card--span12" aria-labelledby="avail-title">
           <div class="card__head">
             <h2 id="avail-title" class="card__title">Slack manual availability</h2>
-            <span class="card__hint">Autonomy L2 · visible GUI only · verified before success</span>
+            <span class="autonomy-badge autonomy-badge--acts">Changes availability · verified before success</span>
           </div>
           <p class="card__lede">
             Opens Slack, reads the profile menu's manual Active/Away toggle, and clicks it only when
@@ -222,7 +285,7 @@
 
           <h3 class="subhead">Per environment</h3>
           <div class="tablewrap">
-            <table class="table">
+            <table class="table table--responsive table--availability">
               <thead>
                 <tr>
                   <th scope="col">KVM</th>
@@ -239,14 +302,247 @@
       </div>
     </div>
 
+    <!-- Slack triage -->
+    <div class="view" data-view="triage" hidden>
+      <div class="grid">
+        <section class="card card--span12" aria-labelledby="triage-title">
+          <div class="card__head">
+            <div>
+              <h2 id="triage-title" class="card__title">Slack inbox triage</h2>
+              <span id="triage-captured-at" class="card__hint card__hint--left">Not checked yet</span>
+            </div>
+            <div class="card__tools">
+              <span class="autonomy-badge">Observe only · never opens a conversation</span>
+              <button id="triage-clear" class="button button--quiet" type="button" disabled title="Hides these temporary results; it does not alter Slack">Hide results</button>
+            </div>
+          </div>
+          <p class="card__lede">
+            Reports what Slack already shows: unread channels and direct messages, their counts, and
+            mention badges. Conversations are never opened, so your unread state survives. Names are
+            shown here but never written to any log.
+          </p>
+          <div class="actions">
+            <button class="button button--primary" type="button" data-triage="__all__">
+              Check all environments
+            </button>
+            <span id="triage-per-kvm" class="actions"></span>
+          </div>
+          <div id="triage-body"></div>
+        </section>
+      </div>
+    </div>
+
+    <!-- Today's meetings -->
+    <div class="view" data-view="agenda" hidden>
+      <div class="grid">
+        <section class="card card--span12" aria-labelledby="agenda-title">
+          <div class="card__head">
+            <div>
+              <h2 id="agenda-title" class="card__title">Today's meetings</h2>
+              <span id="agenda-captured-at" class="card__hint card__hint--left">Not checked yet</span>
+            </div>
+            <div class="card__tools">
+              <span class="autonomy-badge">Observe only · never opens or joins a meeting</span>
+              <button id="agenda-clear" class="button button--quiet" type="button" disabled title="Hides these temporary results; it does not alter your calendar">Hide results</button>
+            </div>
+          </div>
+          <p class="card__lede">
+            Reads a calendar that is <strong>already open</strong> on the remote machine — the Teams
+            Calendar tab or a browser tab — and reports what today's grid already shows, scrolling
+            when the day is clipped. It never opens a meeting, never clicks Join, and never answers
+            an invitation. Times are compared against the clock on that machine, not this one.
+            Meeting details are shown here but never written to any log.
+          </p>
+          <div class="actions">
+            <button class="button button--primary" type="button" data-agenda="__all__">
+              Read all environments
+            </button>
+            <span id="agenda-per-kvm" class="actions"></span>
+          </div>
+          <div id="agenda-body"></div>
+        </section>
+      </div>
+    </div>
+
+
+    <!-- Meetings -->
+    <div class="view" data-view="meetings" hidden>
+      <div class="grid">
+        <section class="card card--span5" aria-labelledby="recorder-title">
+          <div class="card__head">
+            <div>
+              <h2 id="recorder-title" class="card__title">Recorder</h2>
+              <span id="recorder-hint" class="card__hint card__hint--left">Loading…</span>
+            </div>
+            <button id="meetings-reload" class="button button--quiet button--small" type="button">Reload</button>
+          </div>
+          <p class="card__lede">
+            Records the remote computer's HDMI audio over a receive-only PiKVM WebRTC session.
+            Nothing is installed on the remote and no bot joins the call. Stop transcribes the
+            audio (Deepgram), extracts action items and decisions (OpenAI), and writes a report.
+          </p>
+          <div id="recorder-status" class="recorder" aria-live="polite">
+            <div class="recorder__state">
+              <span id="recorder-dot" class="recorder__dot" aria-hidden="true"></span>
+              <span id="recorder-phase" class="recorder__phase">Idle</span>
+              <span id="recorder-elapsed" class="recorder__elapsed mono"></span>
+            </div>
+            <p id="recorder-next" class="recorder__next"></p>
+          </div>
+          <div class="recorder__controls">
+            <label class="field field--inline">
+              <span class="field__label">Environment</span>
+              <select id="meeting-kvm" class="control"></select>
+            </label>
+            <div class="button-row">
+              <button id="meeting-start" class="button button--primary" type="button">Start recording</button>
+              <button id="meeting-stop" class="button button--danger" type="button">Stop &amp; process</button>
+            </div>
+          </div>
+          <div id="meeting-setup" class="notice notice--warn" hidden></div>
+          <p class="card__footnote mono" id="meetings-dir"></p>
+        </section>
+
+        <section class="card card--span7" aria-labelledby="sessions-title">
+          <div class="card__head">
+            <div>
+              <h2 id="sessions-title" class="card__title">Recorded meetings</h2>
+              <span id="sessions-hint" class="card__hint card__hint--left"></span>
+            </div>
+          </div>
+          <div id="sessions-list" class="sessionlist" aria-busy="true"></div>
+        </section>
+
+        <section id="meeting-detail" class="card card--span12" aria-labelledby="meeting-detail-title" hidden>
+          <div class="card__head">
+            <div>
+              <h2 id="meeting-detail-title" class="card__title">Meeting report</h2>
+              <span id="meeting-detail-hint" class="card__hint card__hint--left"></span>
+            </div>
+            <div class="button-row">
+              <button id="meeting-copy-report" class="button button--small" type="button">Copy report</button>
+              <button id="meeting-detail-close" class="button button--quiet button--small" type="button">Close</button>
+            </div>
+          </div>
+          <div id="meeting-detail-body" class="report"></div>
+        </section>
+      </div>
+    </div>
+
+    <!-- Profiles -->
+    <div class="view" data-view="profiles" hidden>
+      <div class="grid">
+        <section class="card card--span7" aria-labelledby="profiles-title">
+          <div class="card__head">
+            <div>
+              <h2 id="profiles-title" class="card__title">Named PiKVMs</h2>
+              <span id="profiles-hint" class="card__hint card__hint--left">Loading profiles…</span>
+            </div>
+            <button id="profiles-reload" class="button button--quiet button--small" type="button">Reload</button>
+          </div>
+          <p class="card__lede">
+            Each profile names one PiKVM. Passwords and 2FA seeds live only in macOS Keychain on this
+            Mac; this page never receives them. Disabled profiles stay configured but are excluded
+            from every run target, filter, and schedule. Profiles from <code>.env</code> can be
+            disabled here but only removed by editing that file.
+          </p>
+          <div id="profiles-list" class="profilelist" aria-busy="true">
+            <div class="profilecard profilecard--skeleton" aria-hidden="true"><span class="skeleton skeleton--title"></span><span class="skeleton skeleton--line"></span></div>
+            <div class="profilecard profilecard--skeleton" aria-hidden="true"><span class="skeleton skeleton--title"></span><span class="skeleton skeleton--line"></span></div>
+          </div>
+        </section>
+
+        <section class="card card--span5" aria-labelledby="profile-add-title">
+          <div class="card__head">
+            <h2 id="profile-add-title" class="card__title">Add a PiKVM</h2>
+            <span class="card__hint">stored in Keychain</span>
+          </div>
+          <form id="profile-form" class="form" novalidate autocomplete="off">
+            <label class="field">
+              <span class="field__label">Profile name</span>
+              <input id="profile-name" class="control control--text" name="name" type="text" required maxlength="40" pattern="[a-z0-9][a-z0-9_\-]{0,39}" placeholder="e.g. lab_kvm" spellcheck="false" autocapitalize="off">
+              <span class="field__hint">Lowercase letters, digits, dash or underscore · up to 40 characters</span>
+            </label>
+            <label class="field">
+              <span class="field__label">PiKVM URL</span>
+              <input id="profile-url" class="control control--text control--mono" name="url" type="url" required placeholder="https://100.64.0.2" spellcheck="false" autocapitalize="off">
+            </label>
+            <div class="field-row">
+              <label class="field">
+                <span class="field__label">Username</span>
+                <input id="profile-username" class="control control--text" name="username" type="text" required autocomplete="off" spellcheck="false" autocapitalize="off">
+              </label>
+              <label class="field">
+                <span class="field__label">Password</span>
+                <input id="profile-password" class="control control--text" name="password" type="password" required autocomplete="new-password">
+                <span class="field__hint">Sent once to this local server; never shown again</span>
+              </label>
+            </div>
+            <label class="check">
+              <input id="profile-totp" type="checkbox" name="totp_required" checked>
+              <span>Requires 2FA (TOTP) — enroll its provisioning QR after adding</span>
+            </label>
+            <label class="check">
+              <input id="profile-verify-ssl" type="checkbox" name="verify_ssl">
+              <span>Verify TLS certificate (off for self-signed PiKVM certificates)</span>
+            </label>
+            <p id="profile-form-error" class="field-error" role="alert" hidden></p>
+            <div class="actions">
+              <button id="profile-add" class="button button--primary" type="submit">Add profile</button>
+              <span class="actions__note">The password travels browser → this Mac only and goes straight to Keychain.</span>
+            </div>
+          </form>
+        </section>
+
+        <section id="totp-panel" class="card card--span12 card--accent" aria-labelledby="totp-title" hidden>
+          <div class="card__head">
+            <div>
+              <h2 id="totp-title" class="card__title">Enroll 2FA for <span id="totp-target" class="mono">—</span></h2>
+              <span class="card__hint card__hint--left">Provisioning QR screenshot · PNG or JPEG · up to 8 MB</span>
+            </div>
+            <button id="totp-close" class="button button--quiet button--small" type="button">Close</button>
+          </div>
+          <p class="card__lede">
+            Drop a screenshot of the PiKVM 2FA provisioning QR code below. The QR is decoded
+            <strong>locally on this Mac</strong>, the seed goes straight into macOS Keychain, the image
+            is discarded immediately, and nothing is previewed or kept in this browser.
+          </p>
+          <div id="totp-dropzone" class="dropzone" tabindex="0" role="button" aria-describedby="totp-status">
+            <span class="dropzone__title">Drop the QR screenshot here</span>
+            <span class="dropzone__sub">or <label class="linkish" for="totp-file">choose a file</label></span>
+            <input id="totp-file" class="visually-hidden" type="file" accept="image/png,image/jpeg">
+          </div>
+          <p id="totp-status" class="actions__note" aria-live="polite"></p>
+          <ul id="totp-notes" class="notes" hidden></ul>
+          <div id="totp-replace" class="confirm" hidden>
+            <span class="confirm__text">A 2FA seed already exists for this PiKVM. Replace it with the one in this QR?</span>
+            <div class="confirm__actions">
+              <button id="totp-replace-confirm" class="button button--danger button--small" type="button">Replace existing seed</button>
+              <button id="totp-replace-cancel" class="button button--quiet button--small" type="button">Keep existing</button>
+            </div>
+          </div>
+        </section>
+      </div>
+    </div>
+
     <!-- Schedule -->
     <div class="view" data-view="schedule" hidden>
       <div class="grid">
-        <section class="card card--span7" aria-labelledby="sched-title">
+        <section class="card card--span7 schedule-main" aria-labelledby="sched-title">
           <div class="card__head">
-            <h2 id="sched-title" class="card__title">Asia/Karachi schedule</h2>
-            <span class="card__hint">Mac-local launchd · no remote scheduler</span>
+            <div>
+              <h2 id="sched-title" class="card__title">Availability automation</h2>
+              <span class="card__hint card__hint--left">Asia/Karachi · runs locally on this Mac</span>
+            </div>
+            <span id="sched-automation" class="chip chip--unknown">
+              <span class="chip__dot" aria-hidden="true"></span><span class="chip__name">Checking…</span>
+            </span>
           </div>
+
+          <p class="schedule-rule">
+            Set Slack <strong>Active every Monday–Friday at 18:00</strong>, then set it
+            <strong>Away at 02:00 the following morning</strong>.
+          </p>
 
           <div id="schedule-problems" class="problems" hidden></div>
 
@@ -260,26 +556,68 @@
               <span class="kv__val" id="sched-next">—</span>
             </div>
             <div class="kv__row">
-              <span class="kv__key">Active window</span>
-              <span class="kv__val">Mon–Fri 18:00 → Sat 02:00</span>
+              <span class="kv__key">Nightly rule</span>
+              <span class="kv__val">Mon–Fri, 18:00 until 02:00 the following day</span>
             </div>
-            <div class="kv__row kv__row--stacked">
-              <span class="kv__key">Recorded interpreter</span>
-              <span class="kv__val" id="sched-interp-status">—</span>
-              <code class="kv__path" id="sched-interp"></code>
+            <div class="kv__row">
+              <span class="kv__key">Environments covered</span>
+              <span class="kv__val" id="sched-environments">—</span>
+            </div>
+            <div class="kv__row">
+              <span class="kv__key">Last dashboard sync</span>
+              <span class="kv__val" id="sched-last-attempt">—</span>
+            </div>
+            <div class="kv__row">
+              <span class="kv__key">Last outcome</span>
+              <span class="kv__val" id="sched-last-outcome">—</span>
+            </div>
+            <div class="kv__row">
+              <span class="kv__key">Last recorded run</span>
+              <span class="kv__val" id="sched-last-run">—</span>
             </div>
           </div>
 
-          <h3 class="subhead">LaunchAgents</h3>
-          <ul class="rowlist" id="agent-list"></ul>
+          <h3 class="subhead">Environment outcomes</h3>
+          <ul class="rowlist" id="sched-fleet"></ul>
 
-          <div class="actions actions--wrap">
-            <button class="button" type="button" data-schedule="reconcile">Reconcile now</button>
-            <button class="button" type="button" data-schedule="run-now" data-availability="active">Run: Active</button>
-            <button class="button" type="button" data-schedule="run-now" data-availability="away">Run: Away</button>
-            <button class="button button--quiet" type="button" data-schedule="install">Reinstall</button>
-            <button class="button button--quiet" type="button" data-schedule="uninstall">Remove</button>
+          <div class="actions actions--wrap schedule-actions">
+            <button id="schedule-sync" class="button button--primary" type="button" data-schedule="reconcile">
+              Sync all environments now
+            </button>
+            <span class="actions__note">Checks each eligible environment and changes only drifted states.</span>
           </div>
+
+          <details id="schedule-diagnostics" class="details-panel">
+            <summary>Scheduler diagnostics and manual controls</summary>
+            <div class="details-panel__body">
+              <div class="kv">
+                <div class="kv__row kv__row--stacked">
+                  <span class="kv__key">Project interpreter</span>
+                  <span class="kv__val" id="sched-interp-status">—</span>
+                  <code class="kv__path" id="sched-interp"></code>
+                </div>
+              </div>
+
+              <h3 class="subhead">Mac LaunchAgents</h3>
+              <ul class="rowlist" id="agent-list"></ul>
+
+              <h3 class="subhead">Repair and test</h3>
+              <div class="actions">
+                <button id="schedule-repair" class="button" type="button" data-schedule="install">Repair scheduler</button>
+                <button class="button" type="button" data-schedule="run-now" data-availability="active">Test Active run</button>
+                <button class="button" type="button" data-schedule="run-now" data-availability="away">Test Away run</button>
+                <button id="schedule-remove" class="button button--quiet" type="button" data-schedule="uninstall">Turn off and remove</button>
+                <span class="actions__note">Repair rewrites only agents whose plist changed; reloading the hourly agent starts a reconcile immediately (RunAtLoad). Dashboard runs retry once after 30 s and can be cancelled from the task center.</span>
+              </div>
+              <div id="schedule-remove-confirm" class="confirm" hidden>
+                <span class="confirm__text">Turn off and remove the three generated LaunchAgents? Nothing will run on a schedule until the scheduler is repaired.</span>
+                <div class="confirm__actions">
+                  <button id="schedule-remove-confirm-yes" class="button button--danger button--small" type="button">Remove scheduler</button>
+                  <button id="schedule-remove-confirm-no" class="button button--quiet button--small" type="button">Keep it</button>
+                </div>
+              </div>
+            </div>
+          </details>
         </section>
 
         <section class="card card--span5" aria-labelledby="applied-title">
@@ -296,30 +634,17 @@
       </div>
     </div>
 
-    <!-- Activity -->
+    <!-- History -->
     <div class="view" data-view="activity" hidden>
       <div class="grid">
-        <section class="card card--span12" aria-labelledby="reasons-title">
-          <div class="card__head">
-            <h2 id="reasons-title" class="card__title">Stop reasons</h2>
-            <button class="linkish" type="button" data-toggle-table="reasons">Table</button>
-          </div>
-          <p class="card__lede">
-            Sanitized, most frequent first. The controller stops rather than repeating an action it
-            could not verify.
-          </p>
-          <div id="reasons" class="bars"></div>
-          <div id="reasons-table" class="tablewrap" hidden></div>
-        </section>
-
         <section class="card card--span12" aria-labelledby="history-title">
           <div class="card__head">
-            <h2 id="history-title" class="card__title">Run history</h2>
+            <h2 id="history-title" class="card__title">Availability history</h2>
             <span class="card__hint" id="history-hint"></span>
           </div>
           <div id="history-filters" class="chiprow" role="group" aria-label="Filter by KVM"></div>
           <div class="tablewrap tablewrap--tall">
-            <table class="table">
+            <table class="table table--responsive table--history">
               <caption class="visually-hidden">Sanitized availability operations, most recent first</caption>
               <thead>
                 <tr>
@@ -329,11 +654,25 @@
                   <th scope="col">Observed</th>
                   <th scope="col">Outcome</th>
                   <th scope="col">Detail</th>
+                  <th scope="col">Effort</th>
                 </tr>
               </thead>
               <tbody id="history-body"></tbody>
             </table>
           </div>
+        </section>
+
+        <section class="card card--span12" aria-labelledby="reasons-title">
+          <div class="card__head">
+            <h2 id="reasons-title" class="card__title">Where workflows stopped</h2>
+            <button class="linkish" type="button" data-toggle-table="reasons">Table</button>
+          </div>
+          <p class="card__lede">
+            Sanitized, most frequent first. The controller stops rather than repeating an action it
+            could not verify.
+          </p>
+          <div id="reasons" class="bars"></div>
+          <div id="reasons-table" class="tablewrap" hidden></div>
         </section>
       </div>
     </div>
@@ -344,7 +683,7 @@
         <section class="card card--span12" aria-labelledby="screen-title">
           <div class="card__head">
             <h2 id="screen-title" class="card__title">Remote screen</h2>
-            <span class="card__hint">Autonomy L0 · observe only · never written to disk</span>
+            <span class="autonomy-badge">Observe only · never written to disk</span>
           </div>
           <p class="card__lede">
             One live PiKVM frame. This shows real work-computer content in this browser tab; close it
@@ -355,7 +694,9 @@
               <span class="visually-hidden">KVM to capture</span>
               <select id="shot-kvm" class="control control--compact"></select>
             </label>
-            <button id="shot-capture" class="button" type="button">Capture frame</button>
+            <button id="shot-capture" class="button button--primary" type="button">Capture frame</button>
+            <button id="shot-clear" class="button button--quiet" type="button" disabled>Clear frame</button>
+            <button id="shot-expand" class="button button--quiet" type="button" disabled>View full size</button>
             <span id="shot-meta" class="actions__note"></span>
           </div>
           <div id="shot-holder" class="shot">
@@ -366,25 +707,51 @@
     </div>
 
     <footer class="footer">
-      <span id="footer-paths"></span>
+      <details class="footer__diagnostics">
+        <summary>Dashboard diagnostics</summary>
+        <span id="footer-paths"></span>
+      </details>
     </footer>
   </main>
 
-  <aside id="drawer" class="drawer" aria-label="Run output" data-state="idle">
-    <button id="drawer-toggle" class="drawer__head" type="button" aria-expanded="false">
+  <aside id="drawer" class="drawer" aria-label="Task center" data-state="idle">
+    <button id="drawer-toggle" class="drawer__head" type="button" aria-expanded="false" aria-controls="drawer-body">
       <span id="drawer-glyph" class="drawer__glyph" aria-hidden="true">•</span>
       <span id="drawer-title" class="drawer__title">No run yet</span>
       <span id="drawer-meta" class="drawer__meta"></span>
       <span class="drawer__chevron" aria-hidden="true"></span>
     </button>
     <div id="drawer-body" class="drawer__body" hidden>
-      <div id="run-results" class="resultlist"></div>
-      <pre id="trace" class="trace" tabindex="0" aria-live="polite" aria-label="Controller trace"></pre>
+      <div id="task-announcer" class="visually-hidden" role="status" aria-live="polite" aria-atomic="true"></div>
+      <div id="task-controls" class="actions" hidden>
+        <button id="job-cancel" class="button button--small button--quiet" type="button">Cancel selected task</button>
+        <span id="job-cancel-note" class="actions__note"></span>
+      </div>
+      <div class="drawer__columns">
+        <div id="run-results" class="resultlist" aria-label="Recent dashboard tasks"></div>
+        <pre id="trace" class="trace" tabindex="0" aria-label="Selected task technical trace"></pre>
+      </div>
     </div>
   </aside>
 
 </div>
 
+<dialog id="shot-dialog" class="shot-dialog" aria-labelledby="shot-dialog-title">
+  <div class="shot-dialog__head">
+    <div>
+      <h2 id="shot-dialog-title">Remote screen · full size</h2>
+      <span id="shot-dialog-meta" class="card__hint card__hint--left"></span>
+    </div>
+    <form method="dialog">
+      <button id="shot-dialog-close" class="ghost-button" type="submit">Close</button>
+    </form>
+  </div>
+  <div id="shot-dialog-holder" class="shot-dialog__body">
+    <img id="shot-dialog-image" alt="Full-size live PiKVM frame" hidden>
+  </div>
+</dialog>
+
+<div id="toasts" class="toasts" aria-label="Notifications"></div>
 <div id="tooltip" class="tooltip" role="tooltip" aria-hidden="true"></div>
 
 <script src="/static/app.js" type="module"></script>

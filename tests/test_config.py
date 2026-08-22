@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from work_agent.pikvm import PiKVMConfigurationError, PiKVMSettings, TotpProviderKind
+from work_agent.pikvm import PiKVMConfigurationError, PiKVMSettings, TotpProviderKind, WorkIdentity
 
 
 @pytest.fixture(autouse=True)
@@ -200,3 +200,92 @@ def test_named_profile_reports_its_prefixed_missing_settings(
 
     assert "PIKVM_HEIDRICK_USERNAME" in str(error.value)
     assert "PIKVM_HEIDRICK_PASSWORD" in str(error.value)
+
+
+def test_work_identity_is_profile_scoped_and_aliases_are_normalized(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("work_agent.pikvm.config.load_dotenv", lambda: False)
+    monkeypatch.setenv("PIKVM_PROFILES", "heidrick,lab")
+    for profile in ("HEIDRICK", "LAB"):
+        monkeypatch.setenv(f"PIKVM_{profile}_URL", f"https://{profile.lower()}.example")
+        monkeypatch.setenv(f"PIKVM_{profile}_USERNAME", "operator")
+        monkeypatch.setenv(f"PIKVM_{profile}_PASSWORD", "secret")
+    monkeypatch.setenv("PIKVM_HEIDRICK_WORK_IDENTITY_NAME", " Shafiq ")
+    monkeypatch.setenv(
+        "PIKVM_HEIDRICK_WORK_IDENTITY_ALIASES",
+        "Shafiq, Shafique,SHAFIQUE",
+    )
+
+    heidrick = PiKVMSettings.from_env("heidrick")
+    lab = PiKVMSettings.from_env("lab")
+
+    assert heidrick.work_identity == WorkIdentity(
+        name="Shafiq",
+        aliases=("Shafiq", "Shafique"),
+    )
+    assert heidrick.work_identity.matches(" shafique ")
+    assert lab.work_identity is None
+
+
+def test_work_identity_never_uses_an_unprefixed_global_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("work_agent.pikvm.config.load_dotenv", lambda: False)
+    monkeypatch.setenv("PIKVM_PROFILES", "heidrick")
+    monkeypatch.setenv("PIKVM_HEIDRICK_URL", "https://heidrick.example")
+    monkeypatch.setenv("PIKVM_HEIDRICK_USERNAME", "operator")
+    monkeypatch.setenv("PIKVM_HEIDRICK_PASSWORD", "secret")
+    monkeypatch.setenv("WORK_IDENTITY_NAME", "Must not be used")
+    monkeypatch.setenv("WORK_IDENTITY_ALIASES", "Also ignored")
+
+    assert PiKVMSettings.from_env("heidrick").work_identity is None
+
+
+@pytest.mark.parametrize(
+    ("name", "aliases", "message"),
+    [
+        (None, "Shafique", "WORK_IDENTITY_NAME is required"),
+        ("Shafiq", "Shafique,,Shafiq", "without empty aliases"),
+    ],
+)
+def test_invalid_profile_work_identity_is_rejected(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str | None,
+    aliases: str,
+    message: str,
+) -> None:
+    monkeypatch.setattr("work_agent.pikvm.config.load_dotenv", lambda: False)
+    monkeypatch.setenv("PIKVM_PROFILES", "heidrick")
+    monkeypatch.setenv("PIKVM_HEIDRICK_URL", "https://heidrick.example")
+    monkeypatch.setenv("PIKVM_HEIDRICK_USERNAME", "operator")
+    monkeypatch.setenv("PIKVM_HEIDRICK_PASSWORD", "secret")
+    if name is not None:
+        monkeypatch.setenv("PIKVM_HEIDRICK_WORK_IDENTITY_NAME", name)
+    monkeypatch.setenv("PIKVM_HEIDRICK_WORK_IDENTITY_ALIASES", aliases)
+
+    with pytest.raises(PiKVMConfigurationError, match=message):
+        PiKVMSettings.from_env("heidrick")
+
+
+def test_work_identity_rejects_control_characters() -> None:
+    with pytest.raises(PiKVMConfigurationError, match="control characters"):
+        WorkIdentity(name="Shafiq\nOther")
+
+
+def test_work_identity_limits_match_the_protected_capture_manifest() -> None:
+    with pytest.raises(PiKVMConfigurationError, match="120 characters"):
+        WorkIdentity(name="x" * 121)
+    with pytest.raises(PiKVMConfigurationError, match="at most 20 names"):
+        WorkIdentity(name="Primary", aliases=tuple(f"Alias {index}" for index in range(20)))
+
+
+def test_pikvm_settings_repr_does_not_expose_the_work_identity() -> None:
+    settings = PiKVMSettings(
+        base_url="https://pikvm.example",
+        username="admin",
+        password="secret",
+        work_identity=WorkIdentity("Private Work Name"),
+    )
+
+    assert "Private Work Name" not in repr(settings)

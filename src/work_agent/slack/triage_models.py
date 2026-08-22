@@ -48,6 +48,10 @@ class SlackTriagePerception(_Strict):
     conversations: list[UnreadConversation]
     total_unread_badge: int | None = Field(default=None, ge=0, le=9999)
     sidebar_truncated: bool
+    # A menu, popover, or dialog covering the list. Distinct from truncation: an obstructed
+    # read can look empty, which would be a false negative rather than an honest zero.
+    sidebar_obstructed: bool = False
+    obstruction: str | None = Field(default=None, max_length=200)
     summary: str = Field(min_length=1, max_length=600)
     safe_to_read: bool
     stop_reason: str | None = Field(default=None, max_length=300)
@@ -80,6 +84,7 @@ class TriageReport:
     items: tuple[TriageItem, ...] = ()
     total_unread_badge: int | None = None
     sidebar_truncated: bool = False
+    sidebar_obstructed: bool = False
     confidence: float = 0.0
     error: str | None = None
     stop_code: str | None = None

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import functools
 from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
@@ -10,7 +11,7 @@ from work_agent.agent.config import HARD_MAX_RUNTIME_SECONDS, HARD_MAX_STEPS, Ag
 from work_agent.agent.controller import AgentController, ControllerOptions
 from work_agent.agent.debug import DebugArtifacts
 from work_agent.agent.executor import ActionExecutor
-from work_agent.agent.lock import ControllerLock
+from work_agent.agent.lock import DEFAULT_LOCK_WAIT_SECONDS, ControllerLock
 from work_agent.agent.models import AgentFinalStatus, AgentSessionResult, ApprovalMode
 from work_agent.agent.openai_planner import OpenAIActionPlanner
 from work_agent.agent.pikvm_session import PiKVMSession
@@ -121,6 +122,7 @@ def execute_agent_command(
     args: argparse.Namespace,
     *,
     totp_provider: TotpProvider | None = None,
+    controller_lock: ControllerLock | None = None,
     output: Callable[[str], None] = print,
     approval_provider: ApprovalProvider | None = None,
     observation_sink: Callable[[ScreenAnalysis], None] | None = None,
@@ -131,6 +133,7 @@ def execute_agent_command(
         Callable[[ScreenAnalysis, ActionVerification], ActionVerification | None] | None
     ) = None,
     analyzer_transform: Callable[[ScreenAnalyzer, VisionSettings], ScreenAnalyzer] | None = None,
+    lock_wait_seconds: float = DEFAULT_LOCK_WAIT_SECONDS,
 ) -> AgentSessionResult:
     agent_settings = AgentSettings.from_env()
     if args.planner_model is not None:
@@ -157,44 +160,92 @@ def execute_agent_command(
             "keep the directory local."
         )
 
-    with (
-        ControllerLock.for_endpoint(pikvm_settings.base_url),
-        PiKVMSession(
-            pikvm_settings,
-            totp_provider=selected_totp_provider,
-        ) as session,
-    ):
-        base_analyzer: ScreenAnalyzer = OpenAIScreenAnalyzer(vision_settings)
-        analyzer = (
-            analyzer_transform(base_analyzer, vision_settings)
-            if analyzer_transform is not None
-            else base_analyzer
-        )
-        planner = OpenAIActionPlanner(agent_settings)
-        controller = AgentController(
-            capture=session.get_screenshot,
-            analyzer=analyzer,
-            planner=planner,
-            policy=policy_engine or PolicyEngine(),
-            executor=ActionExecutor(session),
-            guard=PreActionGuard(material_change_threshold=agent_settings.stale_screen_threshold),
-            settle_detector=ScreenSettleDetector(
-                poll_interval_seconds=agent_settings.screen_poll_interval_seconds,
-                timeout_seconds=agent_settings.screen_change_timeout_seconds,
-                stable_frames=agent_settings.screen_stable_frames,
-                stable_threshold=agent_settings.screen_stable_threshold,
-                localized_change_threshold=(agent_settings.screen_localized_change_threshold),
-            ),
-            approval_provider=approval_provider or TerminalApprovalProvider(output=output),
-            settings=agent_settings,
-            options=options,
-            debug_artifacts=debug,
-            event_sink=output,
-            observation_sink=observation_sink,
-            completion_validator=completion_validator,
-            verification_override=verification_override,
-        )
-        return controller.run(args.objective)
+    run = functools.partial(
+        _run_controller,
+        args=args,
+        agent_settings=agent_settings,
+        vision_settings=vision_settings,
+        options=options,
+        debug=debug,
+        output=output,
+        approval_provider=approval_provider,
+        observation_sink=observation_sink,
+        completion_validator=completion_validator,
+        policy_engine=policy_engine,
+        verification_override=verification_override,
+        analyzer_transform=analyzer_transform,
+    )
+    session_factory = functools.partial(
+        PiKVMSession, pikvm_settings, totp_provider=selected_totp_provider
+    )
+    if controller_lock is not None:
+        # A caller-held lease (one per workflow) is re-entrant; just nest inside it.
+        with controller_lock, session_factory() as session:
+            return run(session)
+
+    lock = ControllerLock.for_endpoint(pikvm_settings.base_url)
+    lock.acquire(
+        timeout_seconds=lock_wait_seconds,
+        on_wait=lambda: output(
+            "Another local workflow is using this PiKVM; waiting for it to finish."
+        ),
+    )
+    try:
+        with session_factory() as session:
+            return run(session)
+    finally:
+        lock.release()
+
+
+def _run_controller(
+    session: PiKVMSession,
+    *,
+    args: argparse.Namespace,
+    agent_settings: AgentSettings,
+    vision_settings: VisionSettings,
+    options: ControllerOptions,
+    debug: DebugArtifacts,
+    output: Callable[[str], None],
+    approval_provider: ApprovalProvider | None,
+    observation_sink: Callable[[ScreenAnalysis], None] | None,
+    completion_validator: Callable[[ScreenAnalysis], str | None] | None,
+    policy_engine: PolicyEngine | None,
+    verification_override: (
+        Callable[[ScreenAnalysis, ActionVerification], ActionVerification | None] | None
+    ),
+    analyzer_transform: Callable[[ScreenAnalyzer, VisionSettings], ScreenAnalyzer] | None,
+) -> AgentSessionResult:
+    base_analyzer: ScreenAnalyzer = OpenAIScreenAnalyzer(vision_settings)
+    analyzer = (
+        analyzer_transform(base_analyzer, vision_settings)
+        if analyzer_transform is not None
+        else base_analyzer
+    )
+    planner = OpenAIActionPlanner(agent_settings)
+    controller = AgentController(
+        capture=session.get_screenshot,
+        analyzer=analyzer,
+        planner=planner,
+        policy=policy_engine or PolicyEngine(),
+        executor=ActionExecutor(session),
+        guard=PreActionGuard(material_change_threshold=agent_settings.stale_screen_threshold),
+        settle_detector=ScreenSettleDetector(
+            poll_interval_seconds=agent_settings.screen_poll_interval_seconds,
+            timeout_seconds=agent_settings.screen_change_timeout_seconds,
+            stable_frames=agent_settings.screen_stable_frames,
+            stable_threshold=agent_settings.screen_stable_threshold,
+            localized_change_threshold=(agent_settings.screen_localized_change_threshold),
+        ),
+        approval_provider=approval_provider or TerminalApprovalProvider(output=output),
+        settings=agent_settings,
+        options=options,
+        debug_artifacts=debug,
+        event_sink=output,
+        observation_sink=observation_sink,
+        completion_validator=completion_validator,
+        verification_override=verification_override,
+    )
+    return controller.run(args.objective)
 
 
 def format_session_result(result: AgentSessionResult) -> str:

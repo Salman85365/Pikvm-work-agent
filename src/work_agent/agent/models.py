@@ -109,6 +109,12 @@ class StopCode(StrEnum):
     STUCK_REPEATED_ACTION = "stuck_repeated_action"
     STUCK_NO_SCREEN_CHANGE = "stuck_no_screen_change"
     INTERRUPTED = "interrupted"
+    # Environment failures, kept apart from INTERNAL_ERROR so an offline KVM, a bad credential,
+    # and a provider outage are never reported as "a local error".
+    PIKVM_UNREACHABLE = "pikvm_unreachable"
+    PIKVM_AUTH_FAILED = "pikvm_auth_failed"
+    MODEL_PROVIDER_ERROR = "model_provider_error"
+    MODEL_OUTPUT_INVALID = "model_output_invalid"
     INTERNAL_ERROR = "internal_error"
 
 
@@ -166,6 +172,9 @@ class ScrollAction(_StrictModel):
     type: Literal["scroll"]
     direction: ScrollDirection
     amount: int = Field(ge=1, le=5)
+    # The wheel scrolls whatever is under the pointer. Naming the scrollable area moves the
+    # pointer over that element first, so a scroll cannot land on the wrong window.
+    element_id: str | None = Field(default=None, min_length=1, max_length=200)
 
 
 class FinishAction(_StrictModel):
@@ -295,7 +304,8 @@ def action_summary(action: Action) -> str:
     if isinstance(action, (MoveMouseAction, ClickElementAction, DoubleClickElementAction)):
         return f"{action.type} element={action.element_id}"
     if isinstance(action, ScrollAction):
-        return f"scroll {action.direction.value} amount={action.amount}"
+        target = f" element={action.element_id}" if action.element_id else ""
+        return f"scroll {action.direction.value} amount={action.amount}{target}"
     if isinstance(action, FinishAction):
         return "finish"
     return "request_user"

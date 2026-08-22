@@ -48,6 +48,18 @@ from work_agent.vision import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _temporary_controller_locks(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from work_agent.agent.lock import ControllerLock
+    from work_agent.slack import triage_operator
+
+    monkeypatch.setattr(
+        triage_operator,
+        "_controller_lock_for_profile",
+        lambda kvm: ControllerLock(tmp_path / f"{kvm}.lock"),
+    )
+
+
 def _conversation(
     name: str,
     *,
@@ -582,3 +594,129 @@ def test_press_key_outside_the_allowlist_is_denied() -> None:
     )
 
     assert decision.decision is PolicyDecisionKind.DENY
+
+
+# ---------------- obstruction: the false-negative guard ----------------
+
+
+def _obstructed(conversations: list[UnreadConversation]) -> SlackTriagePerception:
+    return _perception(conversations).model_copy(
+        update={"sidebar_obstructed": True, "obstruction": "an account menu popover"}
+    )
+
+
+class _SequenceOperator(SlackTriageOperator):
+    """Returns a scripted sequence of reads so the dismiss-and-reread path is observable."""
+
+    def __init__(self, reads: list[SlackTriagePerception], **kwargs: object) -> None:
+        super().__init__(**kwargs)  # type: ignore[arg-type]
+        self._reads = reads
+        self.read_count = 0
+
+    def _read(self, kvm: str) -> SlackTriagePerception:
+        self.read_count += 1
+        return self._reads.pop(0)
+
+
+def _ok_executor(objectives: list[str]) -> object:
+    def executor(args: object, **kwargs: object) -> object:
+        objectives.append(args.objective)  # type: ignore[attr-defined]
+        return SimpleNamespace(status=AgentFinalStatus.SUCCESS, stop_code=StopCode.COMPLETED)
+
+    return executor
+
+
+def test_an_obstructed_sidebar_is_dismissed_and_read_again() -> None:
+    """Reproduces the real heidrick case: a profile popover left open over the DM list."""
+    objectives: list[str] = []
+    operator = _SequenceOperator(
+        [
+            _obstructed([]),
+            _perception([_conversation("venu", kind=ConversationKind.DIRECT_MESSAGE, unread=2)]),
+        ],
+        executor=_ok_executor(objectives),
+    )
+
+    report = operator.execute("heidrick")
+
+    assert operator.read_count == 2
+    assert report.success is True
+    assert [item.name for item in report.needs_attention] == ["venu"]
+    # Foregrounding first, then a dismissal pass that only presses Escape.
+    assert "Make Slack the visible foreground application" in objectives[0]
+    assert "Press Escape to dismiss it" in objectives[1]
+
+
+def test_a_still_obstructed_empty_sidebar_is_not_reported_as_quiet() -> None:
+    """The false negative that matters: a covered list must never read as 'nothing unread'."""
+    operator = _SequenceOperator(
+        [_obstructed([]), _obstructed([])],
+        executor=_ok_executor([]),
+    )
+
+    report = operator.execute("heidrick")
+
+    assert report.success is False
+    assert report.items == ()
+    assert report.sidebar_obstructed is True
+    assert "cannot be trusted" in (report.error or "")
+    assert "account menu popover" in (report.error or "")
+
+
+def test_partially_obstructed_results_are_kept_but_flagged() -> None:
+    operator = _SequenceOperator(
+        [
+            _obstructed([_conversation("venu", kind=ConversationKind.DIRECT_MESSAGE, unread=2)]),
+            _obstructed([_conversation("venu", kind=ConversationKind.DIRECT_MESSAGE, unread=2)]),
+        ],
+        executor=_ok_executor([]),
+    )
+
+    report = operator.execute("heidrick")
+
+    assert report.success is True
+    assert report.sidebar_obstructed is True
+    assert len(report.items) == 1
+
+
+def test_a_clear_sidebar_is_read_once_with_no_dismissal_pass() -> None:
+    objectives: list[str] = []
+    operator = _SequenceOperator(
+        [_perception([_conversation("#ops", unread=1)])],
+        executor=_ok_executor(objectives),
+    )
+
+    report = operator.execute("heidrick")
+
+    assert operator.read_count == 1
+    assert report.success is True
+    assert len(objectives) == 1
+
+
+def test_escape_is_the_only_input_allowed_in_front_of_slack() -> None:
+    """Escape dismisses an overlay and cannot select a conversation, so it is permitted."""
+    screen = _screen(
+        [_element("dm-venu", "Venu", role=UIElementRole.LIST_ITEM, visible_text="2")],
+        application="Slack",
+    )
+    engine = SlackTriagePolicyEngine()
+
+    escape = engine.evaluate(_proposal(PressKeyAction(type="press_key", key="Escape")), screen)
+    enter = engine.evaluate(_proposal(PressKeyAction(type="press_key", key="Enter")), screen)
+    click = engine.evaluate(
+        _proposal(ClickElementAction(type="click_element", element_id="dm-venu", button="left")),
+        screen,
+    )
+
+    assert escape.decision is PolicyDecisionKind.ALLOW
+    assert enter.decision is PolicyDecisionKind.DENY
+    assert click.decision is PolicyDecisionKind.DENY
+
+
+def test_dismiss_objective_forbids_clicking() -> None:
+    from work_agent.slack.triage import DISMISS_OBJECTIVE
+
+    lowered = DISMISS_OBJECTIVE.casefold()
+    assert "only the escape key" in lowered
+    assert "do not click anything" in lowered
+    assert "mark it read" in lowered

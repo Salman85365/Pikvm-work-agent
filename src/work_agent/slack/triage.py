@@ -21,6 +21,11 @@ sidebar_visible false when the conversation sidebar cannot be read. Report conve
 the sidebar is genuinely visible. Set sidebar_truncated true when the list is scrolled or clipped so
 that further unread entries may exist below the visible area.
 
+Set sidebar_obstructed true, and describe it in obstruction, when a menu, popover, dialog, banner,
+or tooltip covers any part of the conversation list - for example an account or profile menu opened
+over the direct-message section. An obstructed sidebar that looks empty is not evidence that nothing
+is unread, so report the obstruction rather than an empty list.
+
 An unread count you cannot read exactly should be 0 with has_mention set from the badge. Prefer
 lowering confidence over guessing a name.
 
@@ -29,8 +34,19 @@ disconnected or blank feed, or any state where the sidebar cannot be trusted."""
 
 
 TRIAGE_CONTEXT = (
-    "Report Slack's currently visible unread conversations. Do not report message contents."
+    "Report Slack's currently visible unread conversations, and whether anything is covering "
+    "the sidebar. Do not report message contents."
 )
+
+
+DISMISS_OBJECTIVE = """A menu, popover, or dialog is covering Slack's conversation sidebar.
+
+Press Escape to dismiss it. Finish once the sidebar's channel and direct-message list is fully
+visible and nothing overlaps it.
+
+Use only the Escape key. Do not click anything: a click could open a conversation, mark it read,
+and destroy the unread signal. Do not scroll. If Escape does not clear the overlay, request user
+assistance rather than clicking."""
 
 
 FOREGROUND_OBJECTIVE = """Make Slack the visible foreground application, then finish.

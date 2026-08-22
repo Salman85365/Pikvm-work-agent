@@ -5,6 +5,7 @@ from work_agent.pikvm.config import (
     DEFAULT_TOTP_KEYCHAIN_SERVICE,
     PiKVMSettings,
     TotpProviderKind,
+    WorkIdentity,
     configured_pikvm_profiles,
 )
 from work_agent.pikvm.errors import (
@@ -65,6 +66,7 @@ __all__ = [
     "SecretStore",
     "TotpProvider",
     "TotpProviderKind",
+    "WorkIdentity",
     "ZxingQrDecoder",
     "build_totp_provider",
     "configured_pikvm_profiles",

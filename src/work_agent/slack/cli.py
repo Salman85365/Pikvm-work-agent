@@ -4,6 +4,7 @@ import argparse
 from collections.abc import Callable
 
 from work_agent.pikvm import configured_pikvm_profiles
+from work_agent.pikvm.profiles import describe_unknown_profile
 from work_agent.slack.agent_operator import AgentAvailabilityOperator
 from work_agent.slack.errors import SlackAvailabilityError
 from work_agent.slack.logging import JsonlAvailabilityLogger
@@ -80,7 +81,7 @@ def _resolve_targets(args: argparse.Namespace) -> tuple[str, ...]:
     if not target:
         raise SlackAvailabilityError("--kvm requires a non-empty named PiKVM profile.")
     if target not in profiles:
-        raise SlackAvailabilityError(f"Unknown PiKVM profile {target!r}.")
+        raise SlackAvailabilityError(describe_unknown_profile(target))
     return (target,)
 
 
@@ -127,6 +128,8 @@ def format_triage_batch(result: TriageBatchResult) -> str:
                 lines.append(f"    · {item.name}{count}")
         if not attention and not other:
             lines.append("    nothing unread")
+        if report.sidebar_obstructed:
+            lines.append("    ! something covered part of the sidebar; this list may be incomplete")
         if report.sidebar_truncated:
             lines.append("    ! sidebar was clipped; more unread entries may exist below")
     for report in result.reports:

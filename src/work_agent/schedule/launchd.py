@@ -13,6 +13,9 @@ from work_agent.schedule.errors import ScheduleError
 
 _LABEL_PREFIX = "com.pikvm-work-agent.slack-availability"
 _REQUIRED_TIMEZONE = "Asia/Karachi"
+# launchctl and the interpreter probe answer in well under a second; a longer wait means a hung
+# process that must not also hang the caller (a launchd job or the dashboard).
+_SUBPROCESS_TIMEOUT_SECONDS = 30.0
 
 
 def _system_timezone_name() -> str | None:
@@ -37,7 +40,12 @@ class SubprocessCommandRunner:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                timeout=_SUBPROCESS_TIMEOUT_SECONDS,
             )
+        except subprocess.TimeoutExpired:
+            raise ScheduleError(
+                f"launchctl did not finish within {_SUBPROCESS_TIMEOUT_SECONDS:g} seconds."
+            ) from None
         except OSError:
             raise ScheduleError("launchctl could not be executed.") from None
         return completed.returncode
@@ -61,8 +69,9 @@ class SubprocessInterpreterProbe:
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
+                timeout=_SUBPROCESS_TIMEOUT_SECONDS,
             )
-        except OSError:
+        except (OSError, subprocess.TimeoutExpired):
             return False
         return completed.returncode == 0
 
@@ -113,12 +122,19 @@ class SlackAvailabilityLaunchdManager:
     ) -> None:
         self._launch_agents_dir = launch_agents_dir or (Path.home() / "Library" / "LaunchAgents")
         self._log_dir = log_dir or (Path.home() / "Library" / "Logs" / "pikvm-work-agent")
-        self._python = (python_executable or Path(sys.executable)).resolve()
+        self._python = Path(os.path.abspath(python_executable or sys.executable))
         self._working_directory = (working_directory or Path.cwd()).resolve()
         self._uid = os.getuid() if uid is None else uid
         self._timezone_name = timezone_name or _system_timezone_name()
         self._runner = runner or SubprocessCommandRunner()
         self._probe = interpreter_probe or SubprocessInterpreterProbe()
+        self._last_install_notes: tuple[str, ...] = ()
+
+    @property
+    def last_install_notes(self) -> tuple[str, ...]:
+        """Human-readable notes about what the most recent ``install`` actually did."""
+
+        return self._last_install_notes
 
     def install(self) -> tuple[LaunchAgentStatus, ...]:
         if self._timezone_name != _REQUIRED_TIMEZONE:
@@ -144,16 +160,42 @@ class SlackAvailabilityLaunchdManager:
 
         domain = f"gui/{self._uid}"
         failures: list[str] = []
+        notes: list[str] = []
         for spec in specs:
-            self._write_plist(spec)
+            unchanged = self._plist_matches(spec)
+            loaded = self._runner.run(("launchctl", "print", f"{domain}/{spec.label}")) == 0
+            if unchanged and loaded:
+                # Booting out a loaded agent kills a reconcile it may be running right now and,
+                # for the RunAtLoad agent, starts a fresh one on bootstrap. Skip both when the
+                # generated plist is byte-for-byte what launchd already has.
+                notes.append(f"{spec.label}: unchanged and loaded; left running.")
+                continue
+            if not unchanged:
+                self._write_plist(spec)
+            # bootout is harmless when nothing is loaded and clears a half-registered agent.
             self._runner.run(("launchctl", "bootout", domain, str(spec.path)))
             if self._runner.run(("launchctl", "bootstrap", domain, str(spec.path))) != 0:
                 failures.append(spec.label)
+                continue
+            if spec.payload.get("RunAtLoad") is True:
+                notes.append(
+                    f"{spec.label}: loaded with RunAtLoad, so launchd starts a reconcile "
+                    "immediately."
+                )
+        self._last_install_notes = tuple(notes)
         if failures:
             raise ScheduleError(
                 "launchd could not load all Slack availability agents: " + ", ".join(failures)
             )
         return self.status()
+
+    @staticmethod
+    def _plist_matches(spec: _LaunchAgentSpec) -> bool:
+        try:
+            existing = spec.path.read_bytes()
+        except OSError:
+            return False
+        return existing == plistlib.dumps(spec.payload, fmt=plistlib.FMT_XML, sort_keys=True)
 
     def uninstall(self) -> tuple[LaunchAgentStatus, ...]:
         domain = f"gui/{self._uid}"
@@ -257,41 +299,27 @@ class SlackAvailabilityLaunchdManager:
                 "StandardErrorPath": stderr_path,
             }
 
+        # The calendar agents are timing triggers only. They used to force `--availability
+        # active/away`, but launchd replays a missed StartCalendarInterval on wake, so a Mac
+        # asleep across a boundary applied the forced value hours late (or two missed triggers
+        # raced each other). Computing the desired state at fire time makes a late trigger a
+        # harmless no-op instead.
+        reconcile_command = ["schedule", "slack-availability", "reconcile", "--if-due"]
+
         active_label = f"{_LABEL_PREFIX}.active"
-        active = base(
-            active_label,
-            [
-                "schedule",
-                "slack-availability",
-                "run-now",
-                "--availability",
-                "active",
-            ],
-        )
+        active = base(active_label, reconcile_command)
         active["StartCalendarInterval"] = [
             {"Weekday": weekday, "Hour": 18, "Minute": 0} for weekday in range(1, 6)
         ]
 
         away_label = f"{_LABEL_PREFIX}.away"
-        away = base(
-            away_label,
-            [
-                "schedule",
-                "slack-availability",
-                "run-now",
-                "--availability",
-                "away",
-            ],
-        )
+        away = base(away_label, reconcile_command)
         away["StartCalendarInterval"] = [
             {"Weekday": weekday, "Hour": 2, "Minute": 0} for weekday in range(2, 7)
         ]
 
         reconcile_label = f"{_LABEL_PREFIX}.reconcile"
-        reconcile = base(
-            reconcile_label,
-            ["schedule", "slack-availability", "reconcile", "--if-due"],
-        )
+        reconcile = base(reconcile_label, reconcile_command)
         reconcile["RunAtLoad"] = True
         reconcile["StartInterval"] = 3600
 

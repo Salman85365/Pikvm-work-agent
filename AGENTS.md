@@ -72,7 +72,10 @@ Use visual reasoning when the UI state genuinely requires it.
 
 The Mac may control multiple PiKVMs through named local profiles. `PIKVM_PROFILES` lists the names,
 `PIKVM_PROFILE` selects the default, and `pikvm-agent --profile NAME ...` selects one explicitly for
-a command. Every profile has isolated URL, username, password, TLS, network, keymap, and TOTP
+a command. Profiles may also be *managed* (added from the dashboard or `pikvm-agent profiles add`):
+their non-secret fields live in an owner-only JSON under Application Support and their password in
+macOS Keychain, never in a file. Any profile can be disabled; disabled profiles are skipped
+everywhere and an explicit selection of one is refused with a message that says so. Every profile has isolated URL, username, password, TLS, network, keymap, and TOTP
 configuration. Never guess a profile when more than one is configured, and never send one profile's
 credentials or HID input to another profile's endpoint.
 
@@ -113,6 +116,40 @@ legitimate action collide, fix the restriction.
 Neither workflow may read or send messages, edit status text or emoji, change preferences, or
 simulate activity. Conversation names are Slack content: never persist them to logs or state.
 
+## Calendar scope boundaries
+
+Reading the day's meetings may only observe a calendar the user already has open, and may only
+report what the grid already draws.
+
+Never join a meeting and never answer an invitation. Joining places the user into a live call with
+their microphone and camera; Accept, Decline, Tentative, and Propose new time send a reply on their
+behalf. Both are irreversible in a way the rest of this workflow is not, so deny them by name in the
+policy engine rather than by prompt instruction alone. Never edit event text.
+
+Unlike Slack triage, merely opening a meeting destroys nothing, so do not ban clicks wholesale: that
+would also deny the Dock icon and Teams' Calendar rail, removing the feature while looking careful.
+
+Try Microsoft Teams first and fall back to an already-open browser calendar only when Teams cannot
+be reached. Never open a new tab, navigate to a URL, or sign in. Stop and say so instead.
+
+A blocking system dialog is walked around, not answered. Clicking the calendar application's own
+Dock icon puts its window in front of the dialog, which is what a person does; never click, dismiss,
+or Escape the dialog itself, and never click Open Software Update, Install, Restart, Later, or
+Remind me. Since 2026-08-19 this is the generic rule for every workflow: `unexpected_dialog` is a
+warning the planner routes around, and the generic policy denies answering the dialog (its buttons,
+Enter, Escape, Space) while it is present; the calendar policy additionally names those buttons.
+An authentication prompt, lock screen, destructive confirmation, disconnected feed, unknown state,
+or low-confidence read still stops the session. Do not widen that list of hard stops downward.
+
+Report a screen that could not be used safely as exactly that. Reporting it as "no calendar found"
+sends someone looking for a calendar that was open the whole time.
+
+Decide what is still ahead using the clock visible in the same screenshot, never this Mac's clock:
+the remote machine may be in another timezone. With no readable clock, report nothing as already
+over. Refuse a calendar showing a day other than today rather than reporting it as today.
+
+Meeting titles, organizers, and locations are calendar content: never persist them to logs or state.
+
 ## Local dashboard
 
 A Mac-local dashboard (`pikvm-agent dashboard`) presents the existing workflows in a browser. It is a
@@ -152,13 +189,21 @@ Sanitize exceptions where credentials could otherwise appear.
 Stop rather than guess when:
 
 - an unexpected authentication screen appears;
-- an unexpected dialog appears;
 - visual confidence is low;
 - screen state does not match the expected workflow;
 - an operation may be destructive;
 - the application appears to be in an unknown state.
 
-The goal is useful automation, not maximum autonomy.
+Walk around, rather than answer, an unexpected dialog or notification: bring the wanted application
+in front and continue; the policy engine denies touching the dialog itself.
+
+Verification of an action that returns uncertain earns one delayed re-observation; a verdict that
+stays unconfirmed is fed back to the planner, which may take a different route a bounded number of
+times. The unverified action itself is never proposed again on that screen, and the transport never
+replays an HID request whose outcome is unknown.
+
+The goal is useful automation, not maximum autonomy - but a policy that blocks the intended path is
+a defect, not safety.
 
 ## Approval policy
 
@@ -267,7 +312,7 @@ Implemented:
 - automatic local TOTP generation from host-isolated macOS Keychain entries;
 - local TOTP provisioning-QR import with safe post-verification deletion;
 - named multi-PiKVM profiles with independent optional 2FA configuration;
-- bounded read-only reauthentication without HID replay;
+- one cookie login per session, with a single safe re-login and repeat on 401/403 (PiKVM authenticates before dispatch, so a rejected request was never applied);
 - screenshot retrieval;
 - keyboard transport;
 - text transport;

@@ -18,6 +18,7 @@ class ReasoningEffort(StrEnum):
     NONE = "none"
     LOW = "low"
     MEDIUM = "medium"
+    HIGH = "high"
 
 
 class ImageDetail(StrEnum):
@@ -47,6 +48,20 @@ class SafetyWarning(StrEnum):
     UNKNOWN_STATE = "unknown_state"
 
 
+# Warning categories that end a session locally, whatever the model's own safe_to_continue said.
+# UNEXPECTED_DIALOG is deliberately absent: see _apply_local_safety.
+HARD_STOP_WARNINGS = frozenset(
+    {
+        SafetyWarning.AUTHENTICATION_PROMPT,
+        SafetyWarning.LOCK_SCREEN,
+        SafetyWarning.DESTRUCTIVE_CONFIRMATION,
+        SafetyWarning.REMOTE_DISCONNECT,
+        SafetyWarning.LOW_CONFIDENCE,
+        SafetyWarning.UNKNOWN_STATE,
+    }
+)
+
+
 class UIElementRole(StrEnum):
     BUTTON = "button"
     ICON = "icon"
@@ -69,9 +84,32 @@ class VerificationStatus(StrEnum):
     NOT_APPLICABLE = "not_applicable"
 
 
+# The perception models below are filled by the vision model. Strict Structured Outputs guarantee
+# the JSON shape but cannot express cross-field rules, and a screen read is a pure observation:
+# rejecting one because `target_found` disagreed with `target`, or a box came back inverted, threw
+# away a whole session over a slip the local code can repair. So model-facing schemas normalise
+# in `mode="before"` and only local, code-authored models stay strict.
+_NORMALIZED_MAX = 1000
+_EVIDENCE_MAX_LENGTH = 500
+_UNLABELED = "unlabeled"
+
+
+def _clamp_coordinate(value: object) -> object:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return value
+    return int(min(max(round(value), 0), _NORMALIZED_MAX))
+
+
 class NormalizedPoint(_StrictModel):
     x: int = Field(ge=0, le=1000)
     y: int = Field(ge=0, le=1000)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _clamp(cls, data: object) -> object:
+        if isinstance(data, dict):
+            return {key: _clamp_coordinate(value) for key, value in data.items()}
+        return data
 
 
 class BoundingBox(_StrictModel):
@@ -79,6 +117,18 @@ class BoundingBox(_StrictModel):
     y1: int = Field(ge=0, le=1000)
     x2: int = Field(ge=0, le=1000)
     y2: int = Field(ge=0, le=1000)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _clamp_and_order(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        values = {key: _clamp_coordinate(value) for key, value in data.items()}
+        for low, high in (("x1", "x2"), ("y1", "y2")):
+            first, second = values.get(low), values.get(high)
+            if isinstance(first, int) and isinstance(second, int) and second < first:
+                values[low], values[high] = second, first
+        return values
 
     @model_validator(mode="after")
     def _validate_order(self) -> BoundingBox:
@@ -96,9 +146,27 @@ class UIElement(_StrictModel):
     click_point: NormalizedPoint | None
     confidence: float = Field(ge=0.0, le=1.0)
 
+    @model_validator(mode="before")
+    @classmethod
+    def _fill_blanks(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        values = dict(data)
+        label = values.get("label")
+        if not isinstance(label, str) or not label.strip():
+            visible = values.get("visible_text")
+            values["label"] = (
+                visible.strip() if isinstance(visible, str) and visible.strip() else _UNLABELED
+            )
+        if values.get("visible_text") is None:
+            values["visible_text"] = ""
+        if isinstance(values.get("id"), str) and not values["id"].strip():
+            values["id"] = "element"
+        return values
+
 
 class ScreenPerception(_StrictModel):
-    """Strict model-generated fields, excluding trusted local request metadata."""
+    """Model-generated screen fields, normalised rather than rejected where the code can repair."""
 
     application: str = Field(min_length=1)
     screen_state: ScreenState
@@ -110,6 +178,31 @@ class ScreenPerception(_StrictModel):
     safe_to_continue: bool
     stop_reason: str | None
     confidence: float = Field(ge=0.0, le=1.0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        values = dict(data)
+        for key in ("application", "summary"):
+            if not isinstance(values.get(key), str) or not values[key].strip():
+                values[key] = "unknown"
+        # target_found is derived, never trusted.
+        values["target_found"] = values.get("target") is not None
+        stop_reason = values.get("stop_reason")
+        if isinstance(stop_reason, str) and not stop_reason.strip():
+            stop_reason = None
+        if values.get("safe_to_continue") is True:
+            stop_reason = None
+        elif values.get("safe_to_continue") is False and stop_reason is None:
+            stop_reason = "The screen analyzer marked the screen unsafe without a reason."
+        values["stop_reason"] = stop_reason
+        if values.get("relevant_elements") is None:
+            values["relevant_elements"] = []
+        if values.get("warnings") is None:
+            values["warnings"] = []
+        return values
 
     @model_validator(mode="after")
     def _validate_consistency(self) -> ScreenPerception:
@@ -127,6 +220,19 @@ class ActionVerification(_StrictModel):
     confidence: float = Field(ge=0.0, le=1.0)
     evidence: str = Field(min_length=1, max_length=500)
     expected_outcome_observed: bool
+
+    @model_validator(mode="before")
+    @classmethod
+    def _bound_evidence(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        values = dict(data)
+        evidence = values.get("evidence")
+        if not isinstance(evidence, str) or not evidence.strip():
+            values["evidence"] = "No evidence was given."
+        elif len(evidence) > _EVIDENCE_MAX_LENGTH:
+            values["evidence"] = evidence[: _EVIDENCE_MAX_LENGTH - 1] + "…"
+        return values
 
 
 class ObservationContext(_StrictModel):

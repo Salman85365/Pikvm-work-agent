@@ -17,4 +17,5 @@ class ActionPlanner(Protocol):
         previous_verification: ActionVerification | None,
         history: Sequence[AgentStepSummary],
         remaining_steps: int,
+        feedback: str | None = None,
     ) -> PlanningResult: ...

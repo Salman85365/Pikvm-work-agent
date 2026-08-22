@@ -3,7 +3,7 @@
 A local Python application that observes and controls a remote computer only through an existing
 PiKVM connection. Nothing is installed on the remote computer.
 
-## Current status: Milestone 5 implementation complete; real multi-KVM validation pending
+## Current status: Milestones 6.5–6.6 implemented; real meeting validation pending
 
 Milestones 1 through 4.5 are complete and have been validated against the real PiKVM/OpenAI path from
 the controlling Mac. Authentication, screenshots, explicit HID operations, screen perception, and
@@ -30,6 +30,10 @@ generic-password item in macOS Keychain and selected by normalized PiKVM hostnam
 decodes the PiKVM provisioning QR entirely on the Mac and verifies it with a harmless PiKVM read.
 Real Keychain enrollment and hardware verification succeeded. Never paste a real TOTP seed or
 provisioning URI into Codex, ChatGPT, a Git file, or any OpenAI prompt.
+
+Explicit receive-only meeting capture and diarized meeting intelligence are now implemented and
+covered by mocked local tests. They have not yet been exercised against real PiKVM HDMI audio; use
+the manual validation commands below before treating that path as hardware-verified.
 
 Milestone 5 adds one bounded Slack GUI workflow for reading and setting manual Active/Away
 availability. It uses the existing controller, visually verifies the menu's current-state toggle,
@@ -129,6 +133,30 @@ and `medium`; supported image details are `low`, `auto`, and `high`. The applica
 
 `.env` is ignored by Git. Never commit an API key, PiKVM credential, TOTP code, real work
 screenshot, or analysis overlay.
+
+## Manage PiKVM profiles
+
+`.env` profiles stay as they are. You can also add, disable, enable, remove, and test profiles
+from the dashboard's Profiles panel or the CLI; the dashboard calls the same service, so neither
+has authority the other lacks:
+
+```bash
+pikvm-agent profiles list
+pikvm-agent profiles add lab --url https://100.64.0.9 --username admin
+pikvm-agent profiles enroll-2fa lab --qr ~/Downloads/pikvm-totp.png
+pikvm-agent profiles test lab
+pikvm-agent profiles disable heidrick
+pikvm-agent profiles enable heidrick
+pikvm-agent profiles remove lab
+```
+
+`add` prompts for the password and stores it in macOS Keychain (service
+`pikvm-work-agent.password`); the non-secret fields go to
+`~/Library/Application Support/pikvm-work-agent/profiles.json` (owner only). Disabled profiles are
+skipped by `--all-kvms`, the scheduler, and the dashboard, and selecting one explicitly says that it
+is disabled. `.env` profiles can be disabled but not removed here. `enroll-2fa` decodes the
+provisioning QR locally and verifies with a screenshot read; in the dashboard the same enrollment
+takes a dropped image and never writes it to disk.
 
 ## Enroll automatic PiKVM TOTP
 
@@ -296,6 +324,21 @@ Available controller safeguards include `--max-steps`, `--timeout`, `--approval-
 approve-everything mode, raw-coordinate autonomous action, shell action, power action, or direct
 OpenAI-to-PiKVM tool path.
 
+How the controller copes with the ordinary mess of a real desktop:
+
+- an unexpected dialog, update prompt, or notification is a warning the planner routes around
+  (bring the wanted application in front); policy denies answering the dialog itself;
+- an uncertain verification earns one delayed re-observation, then bounded re-planning
+  (`AGENT_MAX_VERIFICATION_RECOVERIES`); the unverified action is never proposed again and no HID
+  request is ever replayed;
+- model output the local code can repair is normalised, and a planner slip (an element id that is
+  not clickable) earns one correction round;
+- the PiKVM session logs in once and holds the session cookie, so a long session no longer loses
+  authentication when the TOTP window rolls;
+- everything the code decides is written to `~/Library/Logs/pikvm-work-agent/agent.log`
+  (rotating, owner-only, no screen content), and failures are classified as `pikvm_unreachable`,
+  `pikvm_auth_failed`, `model_provider_error`, `model_output_invalid`, or `internal_error`.
+
 ## Slack manual availability
 
 Read or set one named KVM through Slack's visible GUI:
@@ -391,6 +434,215 @@ Counts only are recorded to `~/Library/Logs/pikvm-work-agent/slack-triage.jsonl`
 unread conversations, mentions, and direct messages. Conversation names are shown live in the
 terminal and the dashboard but never written to disk.
 
+## Today's meetings
+
+Read the meetings already visible on a calendar that is open on the remote machine, for one KVM or
+every configured KVM:
+
+```bash
+pikvm-agent calendar today --kvm heidrick
+pikvm-agent calendar today --all-kvms
+```
+
+Output leads with what is still ahead, then lists what has already finished:
+
+```text
+heidrick  ✓ Tuesday, 12 August · clock 10:04 AM — 3 still ahead
+    ▸ 9:45 AM–10:30 AM  Sprint review (online, in progress)
+    · all day  Company all-hands
+    · 11:00 AM–11:30 AM  Design sync (Room 4)
+  Earlier today: 1
+    · 9:00 AM–9:15 AM  Standup (Room 1)
+    ! the day was still clipped; later meetings may exist below
+```
+
+`▸` marks a meeting already running, `·` everything else.
+
+**Microsoft Teams is tried first.** Its Dock or taskbar icon is clicked, then its Calendar rail if a
+different Teams section is showing. Only when Teams cannot be reached at all does it fall back to a
+browser window whose calendar is already open.
+
+**This never opens or joins a meeting.** A calendar has two controls that a read-only workflow must
+never touch: *Join*, which would place you into a live call with microphone and camera, and
+*Accept*/*Decline*/*Tentative*, which would send a reply on your behalf. Both are denied by name in
+the policy engine, along with editing event text. Ordinary navigation — a Dock icon, Teams' Calendar
+rail, an already-open browser tab — is left to the generic policy, so the workflow can still reach
+the calendar.
+
+It never opens a new tab, navigates to a URL, or signs in anywhere. If neither Teams nor an open
+calendar tab can be reached it stops and says so rather than guessing.
+
+### A dialog covering the screen
+
+Work machines often have a system dialog parked in the middle of the screen — a corporate update
+prompt, say — and the generic controller stops on any unexpected dialog. That would make this
+workflow permanently unusable on exactly the machines that have one.
+
+So the calendar workflow walks *around* the dialog instead of answering it. Clicking the calendar
+application's own Dock icon brings its window to the front, which puts the dialog behind it — the
+same thing a person does. The dialog is never clicked, never dismissed, and never sent an Escape,
+and the policy engine separately refuses to click anything inside it: *Open Software Update*,
+*Install*, *Restart*, and even *Later* or *Remind me*.
+
+This is the only safety relaxation, and it is narrow: only `unexpected_dialog` is cleared, only when
+it is the sole problem. An authentication prompt, lock screen, destructive confirmation,
+disconnected feed, or low-confidence read still stops the session exactly as before. The trace says
+plainly when a dialog was stepped around.
+
+A run that stops because the screen could not be used safely now says so, rather than reporting that
+no calendar was found — those look alike and mean opposite things.
+
+A week view is read as-is — only today's column is reported, identified by the header the calendar
+marks as today. Teams opens on a week grid by default, so refusing week views would refuse the
+normal case.
+
+Times are compared against the clock read from the *same screenshot* — the remote machine's menu bar,
+taskbar, or the calendar's current-time line — not this Mac's clock, because the two may be in
+different timezones. When that clock cannot be read, nothing is marked as already over and the output
+says why. A calendar left on a day other than today is refused rather than reported.
+
+When the day is clipped, a bounded scroll (at most three rounds, stopping early once nothing new
+appears) reveals later meetings, and each read is merged into one list.
+
+The dashboard's **Today's meetings** panel shows the same results with full detail — time, title,
+location, organizer, online and declined tags, and whether anything was clipped or covered.
+
+Counts only are recorded to `~/Library/Logs/pikvm-work-agent/calendar-agenda.jsonl`. Meeting titles,
+organizers, and locations are shown live in the terminal and the dashboard but never written to disk,
+for the same reason Slack conversation names are not.
+
+## Meeting capture and intelligence
+
+Start and stop a recording explicitly, from the CLI or the dashboard's **Meeting recorder** panel
+(start/stop/status, the list of recorded sessions, and a report viewer with the summary, action
+items grouped by ownership, decisions, the transcript, and `report.md`):
+
+```bash
+pikvm-agent meeting start --kvm nbc_kvm
+pikvm-agent meeting status
+pikvm-agent meeting stop
+pikvm-agent meeting list
+pikvm-agent meeting show --session-id meeting-…
+```
+
+First-time hardware check in one command - play audio you are allowed to record on the remote
+computer, then:
+
+```bash
+pikvm-agent meeting validate --kvm nbc_kvm --seconds 60
+```
+
+It starts a recording, reports progress every 15 s, stops after the requested time, transcribes,
+extracts action items, and prints the summary, your action items, decisions, and the report path.
+
+`start` opens a separate authenticated, receive-only WebRTC viewer connection to the selected
+PiKVM. It requests PiKVM's incoming HDMI audio with `audio=true`, `mic=false`, and `camera=false`;
+the audio transceiver is `recvonly`, the video transceiver is inactive, and the implementation has
+no Mac audio-input path. It does not tap the browser, open a meeting, join a call, use a meeting bot,
+or install anything on the remote computer. Recording never starts automatically.
+
+Only one recording can be active at a time. This makes the selector-free `meeting stop` unambiguous
+and prevents audio from two named KVMs being mixed. A second `start` is refused before it opens
+another connection.
+
+The recorder writes private five-minute Ogg/Opus parts. `start` reports success only after an audio
+track has negotiated and an incoming frame has arrived. `stop` asks the detached Mac-local worker to
+finish the current part, then:
+
+1. transcribes every finalized part with timestamps and diarization;
+2. converts provider labels to anonymous `Speaker 1`, `Speaker 2`, and so on;
+3. extracts a strict evidence-linked meeting record;
+4. applies a local ownership guard; and
+5. writes a deterministic Markdown report.
+
+If WebRTC disconnects after audio has arrived, finalized parts are preserved. `meeting status`
+reports the interruption and a later `meeting stop` processes what was safely finalized. If
+transcription or intelligence fails, the audio and any completed intermediate stage remain in place;
+running `meeting stop` again resumes rather than recording again. A stop timeout never force-kills
+the worker.
+
+### Work identity and ownership
+
+Configure identity independently for each named PiKVM:
+
+```dotenv
+PIKVM_HEIDRICK_WORK_IDENTITY_NAME=Shafiq
+PIKVM_HEIDRICK_WORK_IDENTITY_ALIASES=Shafiq,Shafique
+```
+
+The selected profile's identity is snapshotted into that recording's protected manifest. An exact
+name or alias assignment can become `our_identity`. Context such as “your side” may become only
+`possibly_our_identity`, at medium confidence or lower, with a reason. Ambiguous ownership remains
+unknown, and another KVM never inherits Heidrick's identity.
+
+Identity is about action ownership, not voice recognition. Textual aliases are never sent as known
+speaker references and never rename `Speaker N`.
+
+### Providers and local artifacts
+
+Transcription and intelligence are separate provider boundaries:
+
+```dotenv
+MEETING_TRANSCRIPTION_PROVIDER=deepgram   # or openai
+DEEPGRAM_API_KEY=…
+DEEPGRAM_MODEL=nova-3
+DEEPGRAM_LANGUAGE=en
+MEETING_INTELLIGENCE_PROVIDER=openai
+OPENAI_MEETING_MODEL=gpt-5.6-terra
+```
+
+With `deepgram`, each finalized audio part is posted once to Deepgram's pre-recorded `/v1/listen`
+endpoint with diarization and utterances; speakers become anonymous `Speaker N` exactly as with
+the OpenAI transcriber, and the raw response is cached beside the part so a retry never re-uploads
+it. With `openai`, the Audio transcription endpoint (`gpt-4o-transcribe-diarize`) is used instead.
+Intelligence (summary, action items, decisions) always uses the OpenAI meeting model through the
+stateless Responses path with `store=false`. Audio goes only to the configured transcription
+provider; the timestamped transcript and the selected KVM's identity go only to the intelligence
+provider. PiKVM credentials, TOTP values, unrelated profile identities, and artifact paths are
+never included.
+
+Artifacts are stored with `0700` directories and `0600` files in a stable Mac-local directory:
+
+```text
+~/Library/Application Support/pikvm-work-agent/meetings/<kvm>/<date>/<session-id>/
+  manifest.json
+  audio-0001.ogg
+  transcript.json
+  intelligence.json
+  report.md
+```
+
+The built-in directory is outside the repository; `.local-data/` also remains Git-ignored for an
+explicit project-local override. Use an absolute `MEETING_DATA_DIR` for any override. Normal logs
+contain no audio, transcript, summary, speaker, identity, or action-item content. Recordings and
+reports can contain sensitive work information: retain them only as long as needed and follow the
+meeting participants' and organization's recording rules.
+
+To clean up, first confirm `pikvm-agent meeting status` is not recording or processing, then remove
+only the exact completed session directory shown by the CLI. There is deliberately no automatic
+retention or broad cleanup command.
+
+### Manual meeting validation
+
+After setting the Heidrick identity variables above and confirming the test audio is already audible
+through PiKVM, start one short, harmless recording:
+
+```bash
+pikvm-agent meeting start --kvm heidrick
+```
+
+Play or join only content you are permitted to record, then finish it explicitly:
+
+```bash
+pikvm-agent meeting stop
+```
+
+Open the printed `report.md` and verify useful timestamps and anonymous speaker separation, that a
+direct assignment to Shafiq appears under **OUR ACTION ITEMS**, that indirect wording remains under
+**POSSIBLE OUR ACTION ITEMS**, and that other participants' work stays separate. This is the required
+real PiKVM/provider validation; the automated suite uses mocked media and provider boundaries and
+does not claim hardware audio coverage.
+
 ## Mac-local Slack availability schedule
 
 Inspect and exercise reconciliation before installing anything:
@@ -408,12 +660,24 @@ was already verified.
 
 Every scheduler invocation makes one initial attempt. If any profile fails, the same scheduler
 process waits five minutes and retries only the failed profiles, for at most two retry rounds.
-Successful profiles are recorded after each round and are not repeated. Each retry starts a fresh,
-idempotent OBSERVE → REASON → ACT → VERIFY workflow, so HID operations themselves are never blindly
-replayed. Direct `pikvm-agent slack availability ...` commands remain single-attempt.
+Successful profiles are recorded after each round and are not repeated. Before each retry the
+desired state is re-read from the clock, so a retry that crosses 18:00 or 02:00 applies the state
+that is now due rather than the one that just expired. Each retry starts a fresh, idempotent
+OBSERVE → REASON → ACT → VERIFY workflow, so HID operations themselves are never blindly replayed.
+Direct `pikvm-agent slack availability ...` commands remain single-attempt. An unreachable PiKVM
+fails in seconds with `pikvm_unreachable` and no model calls.
 
-Install three inspectable per-user LaunchAgents (Active, Away, and hourly missed-event
-reconciliation), show their state, or remove only those generated files:
+Availability navigation has one additional bounded recovery. A fresh screen that visibly contains
+Slack's exact manual Active/Away control proves that the profile menu opened, even when it correctly
+still shows the pre-change state. If a validated Slack/profile navigation click remains visually
+uncertain, the workflow may start one fresh observe-first controller pass. An uncertain availability
+toggle is never repeated by that recovery path; it receives only a read-only final-state check. Final
+success still requires fresh visible evidence of the requested Active/Away state.
+
+Install three inspectable per-user LaunchAgents (18:00 weekdays, 02:00 Tuesday-Saturday, and
+hourly), show their state, or remove only those generated files. All three run
+`reconcile --if-due` and compute the desired state at fire time, so a trigger launchd replays late
+after sleep is a harmless no-op:
 
 ```bash
 pikvm-agent schedule slack-availability install
@@ -451,14 +715,15 @@ pikvm-agent dashboard
 It binds `127.0.0.1:8787`, prints the URL, and opens a browser tab. `--host` accepts only a loopback
 address, `--port` accepts 1024 through 65535, and `--no-browser` suppresses the automatic tab.
 
-The layout follows `docs/ROADMAP_UPDATED_LONGTERM.md`: skills are navigable in a sidebar grouped as
-Slack, Development, Work, and System, with planned milestones listed but disabled so later skills
-have a place to land. Live skills carry their autonomy level from §10 of that roadmap.
+The sidebar leads with the seven working sections. Future skills live in a compact **Coming later**
+disclosure instead of competing with controls that work today. On phones it becomes one labelled
+section picker, while the current page is also reflected in the URL fragment and page heading.
 
-A **fleet rail** sits above every section and stays visible: one card per configured KVM showing its
-last observed availability, whether that matches what the schedule requires now, its verified-run
-ratio, and its own Check / Active / Away buttons. Multi-KVM work is the normal case, so every
-environment is visible and actionable at once rather than behind a selector.
+A **fleet rail** shows one card per listed KVM: its freshest verified availability, whether that
+matches what the schedule requires now, readiness, its selected-range completion ratio, and explicit
+Check / Set active / Set away actions. Current state is resolved independently of the selected
+history range and uses per-KVM verification times. The rail is fully expanded on Overview and
+collapses to a compact status summary on focused sections.
 
 Sections:
 
@@ -467,14 +732,29 @@ Sections:
   most recent runs.
 - **Slack › Availability** — all-environment actions plus a per-environment table of observed state,
   required state, last verified state, and actions.
-- **Schedule** — real health, state required now, next Asia/Karachi transition, the active window,
-  the recorded interpreter, per-agent installed/loaded state, and reconcile / run-now / reinstall /
-  remove controls.
-- **Activity** — sanitized stop reasons and the full run history, filterable per KVM.
-- **Remote screen** — one live PiKVM frame for a chosen KVM.
+- **Inbox & triage** — visible unread signals grouped into attention and informational sections,
+  with capture time, incomplete-result warnings, and an explicit clear action.
+- **Today's meetings** — what is still ahead on an already-open calendar, with an in-progress
+  meeting first and finished ones below, plus the remote clock the split was based on, capture time,
+  incomplete-result warnings, and an explicit clear action.
+- **Schedule** — a plain-language nightly rule, required state, next transition, covered
+  environments, last dashboard sync, and one primary Sync action. Interpreter, LaunchAgent, repair,
+  test, and remove controls are kept in a diagnostics disclosure.
+- **Availability history** — sanitized stop reasons and the full run history, filterable by KVM and
+  outcome.
+- **Remote screen** — one temporary PiKVM frame with clear and full-size controls. The browser
+  revokes it when the user leaves the section or after five minutes.
 
-Long-running work streams into a **run drawer** docked at the bottom, so the sanitized controller
-trace stays visible no matter which section you launched it from. Charts each have a table view.
+Long-running work streams into a recoverable **Task center** docked at the bottom. Independent jobs
+remain visible when another KVM starts work, mixed batches are labelled **Completed with issues**,
+and a browser refresh reconnects to work still running in that dashboard process. Technical trace
+text is available on demand without being announced line by line. The drawer is height-capped and
+scrollable, and page content reserves its measured height. Charts each have a table view.
+
+Dashboard refreshes retain previously loaded panels when one source fails, identify the stale source,
+and keep current-state reads separate from the selected analytics range. Batch workflows run every
+eligible profile and return an explicit skipped result for each unconfigured or interactive-TOTP
+profile instead of aborting ready profiles.
 
 The dashboard is a local view over the same code paths as the CLI. It adds no new automation
 authority: runs go through the same bounded controller, the same local policy, and the same visible
@@ -491,7 +771,7 @@ Safety properties worth knowing:
 - passwords, TOTP seeds, generated codes, and API keys are never sent to the browser;
 - a profile configured for interactive TOTP entry is rejected before a run starts, because a server
   must never block on a terminal prompt;
-- screenshots are streamed with `no-store` and never written to disk.
+- job responses and screenshots are served with `no-store`; screenshots are never written to disk.
 
 Captured frames show real work-computer content in a browser tab. Close the tab when finished.
 
@@ -532,6 +812,17 @@ Put real screenshots and any expected-results manifest under `evals/private/`. P
 QR images under `.local-secrets/`. Those directories and the standard screenshot/overlay/QR names
 are ignored by Git. Unit tests use generated neutral images and fake TOTP QR codes plus mocked
 Keychain, PiKVM, and OpenAI responses; they never spend API credits or access real credentials.
+
+## Diagnose a failed run
+
+```bash
+tail -50 ~/Library/Logs/pikvm-work-agent/agent.log
+tail -5 ~/Library/Logs/pikvm-work-agent/slack-availability.jsonl
+```
+
+The JSONL carries the stop code, the sanitized reason, and per-run telemetry (sessions, steps, HID
+actions, model calls, tokens, runtime); `agent.log` carries the step-by-step controller trace and
+the exception class behind any error. Neither contains screen content.
 
 ## Run automated checks
 

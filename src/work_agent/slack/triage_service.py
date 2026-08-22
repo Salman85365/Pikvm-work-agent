@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol
 
+from work_agent.diagnostics import log_exception
 from work_agent.slack.errors import SlackAvailabilityError
 from work_agent.slack.triage_models import AttentionLevel, TriageBatchResult, TriageReport
+
+_LOGGER = logging.getLogger(__name__)
 
 
 class TriageOperator(Protocol):
@@ -76,17 +80,21 @@ class SlackTriageService:
                 report = self._operator.execute(kvm)
             except SlackAvailabilityError as exc:
                 report = TriageReport(kvm=kvm, success=False, error=str(exc))
-            except Exception:
+            except Exception as exc:
+                log_exception(_LOGGER, f"Slack triage for {kvm} crashed", exc)
                 report = TriageReport(
                     kvm=kvm,
                     success=False,
-                    error="An unexpected local error stopped this KVM triage.",
+                    error=(
+                        f"An unexpected local error stopped this KVM triage ({type(exc).__name__})."
+                    ),
                 )
             try:
                 self._logger.record(report)
             except SlackAvailabilityError as exc:
                 report = replace(report, log_error=str(exc))
-            except Exception:
+            except Exception as exc:
+                log_exception(_LOGGER, "Slack triage logging failed", exc)
                 report = replace(
                     report,
                     log_error="An unexpected local error prevented triage logging.",

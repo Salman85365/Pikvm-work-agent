@@ -6,6 +6,7 @@ from work_agent.agent.models import (
     DoubleClickElementAction,
     PolicyDecision,
     PolicyDecisionKind,
+    PressKeyAction,
     RiskCategory,
     is_hid_action,
 )
@@ -35,6 +36,14 @@ class SlackTriagePolicyEngine(PolicyEngine):
             return decision
 
         if _slack_is_foreground(screen):
+            # Escape is the one input allowed in front of Slack: it dismisses a menu or popover
+            # covering the sidebar and cannot select or open a conversation.
+            if isinstance(action, PressKeyAction) and action.key == "Escape":
+                return PolicyDecision(
+                    decision=PolicyDecisionKind.ALLOW,
+                    reason="Escape dismisses an overlay without selecting anything.",
+                    inferred_risk=RiskCategory.NAVIGATION,
+                )
             return PolicyDecision(
                 decision=PolicyDecisionKind.DENY,
                 reason=(

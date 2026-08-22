@@ -8,10 +8,12 @@ import pytest
 
 from work_agent.agent import controller
 from work_agent.agent.approval import NonInteractiveApprovalProvider
+from work_agent.agent.lock import ControllerLock
 from work_agent.agent.models import (
     ActionProposal,
     AgentFinalStatus,
     ClickElementAction,
+    ExecutionTransportStatus,
     RequestUserAction,
     RiskCategory,
     StopCode,
@@ -35,6 +37,21 @@ from work_agent.vision import (
     UIElementRole,
     VerificationStatus,
 )
+
+
+@pytest.fixture(autouse=True)
+def _temporary_controller_locks(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from work_agent.slack import agent_operator
+
+    monkeypatch.setattr(
+        agent_operator,
+        "_controller_lock_for_profile",
+        lambda kvm: ControllerLock(tmp_path / f"{kvm}.lock"),
+    )
+    monkeypatch.setattr(agent_operator, "_press_escape", _ESCAPES.append)
+
+
+_ESCAPES: list[str] = []
 
 
 def _analysis(toggle: str | None) -> ScreenAnalysis:
@@ -144,7 +161,9 @@ def test_agent_operator_reports_verified_transitions_and_no_ops(
         observed=desired,
         changed=changed,
         success=True,
+        telemetry=result.telemetry,
     )
+    assert result.telemetry is not None and result.telemetry.sessions == 1
     args = received["args"]
     assert args.profile == "work-kvm"
     assert args.dry_run is False
@@ -221,6 +240,30 @@ def _availability_click_proposal() -> ActionProposal:
     )
 
 
+def _profile_click_proposal() -> ActionProposal:
+    return ActionProposal(
+        action=ClickElementAction(
+            type="click_element",
+            element_id="slack_profile_avatar",
+            button="left",
+        ),
+        expected_outcome="The profile menu opens.",
+        confidence=0.98,
+        risk=RiskCategory.READ_ONLY,
+        reason_summary="Open profile menu.",
+    )
+
+
+def _executed_step(proposal: ActionProposal) -> SimpleNamespace:
+    return SimpleNamespace(
+        proposal=proposal,
+        execution_result=SimpleNamespace(
+            hid_action=True,
+            transport_status=ExecutionTransportStatus.SENT,
+        ),
+    )
+
+
 def test_failed_mutation_gets_one_read_only_final_state_verification() -> None:
     calls: list[object] = []
     trace: list[str] = []
@@ -250,10 +293,15 @@ def test_failed_mutation_gets_one_read_only_final_state_verification() -> None:
         observed=Availability.ACTIVE,
         changed=True,
         success=True,
+        telemetry=result.telemetry,
     )
+    assert result.telemetry is not None and result.telemetry.sessions == 2
     assert len(calls) == 2
     assert "Do not change it" in calls[1].objective
-    assert trace == ["work-kvm  | Starting one read-only final-state verification pass."]
+    assert trace == [
+        "work-kvm  | Starting one read-only final-state verification pass.",
+        "work-kvm  | Closed the profile menu with Escape.",
+    ]
 
 
 def test_read_only_verification_never_retries_a_failed_availability_change() -> None:
@@ -285,18 +333,145 @@ def test_read_only_verification_never_retries_a_failed_availability_change() -> 
     assert all("Set Slack manual availability" not in call.objective for call in calls[1:])
 
 
-def test_profile_navigation_failure_does_not_trigger_a_second_controller_session() -> None:
+def test_profile_navigation_failure_gets_one_fresh_observe_first_recovery() -> None:
     calls: list[object] = []
-    profile_proposal = ActionProposal(
+    trace: list[str] = []
+
+    def executor(args: object, **kwargs: object) -> object:
+        calls.append(args)
+        if len(calls) == 2:
+            kwargs["observation_sink"](_analysis("Set yourself as away"))
+            return SimpleNamespace(
+                status=AgentFinalStatus.SUCCESS,
+                stop_code=StopCode.COMPLETED,
+            )
+        return SimpleNamespace(
+            status=AgentFinalStatus.FAILED,
+            stop_code=StopCode.VERIFICATION_FAILED,
+            summary="Previous action was not verified; it will not be repeated.",
+            telemetry=SimpleNamespace(hid_actions=1),
+            history=[_executed_step(_profile_click_proposal())],
+        )
+
+    result = AgentAvailabilityOperator(executor=executor, trace_output=trace.append).execute(
+        "work-kvm",
+        Availability.ACTIVE,
+    )
+
+    assert result.success is True
+    assert result.observed is Availability.ACTIVE
+    assert len(calls) == 2
+    assert trace == [
+        "work-kvm  | Starting one fresh observe-first recovery after uncertain Slack navigation.",
+        "work-kvm  | Closed the profile menu with Escape.",
+    ]
+    assert _ESCAPES[-1] == "work-kvm"
+
+
+def test_profile_navigation_recovery_is_bounded_to_one_extra_session() -> None:
+    calls: list[object] = []
+
+    def executor(args: object, **_kwargs: object) -> object:
+        calls.append(args)
+        return SimpleNamespace(
+            status=AgentFinalStatus.FAILED,
+            stop_code=StopCode.VERIFICATION_FAILED,
+            summary="Previous action was not verified; it will not be repeated.",
+            telemetry=SimpleNamespace(hid_actions=1),
+            history=[_executed_step(_profile_click_proposal())],
+        )
+
+    result = AgentAvailabilityOperator(executor=executor).execute(
+        "work-kvm",
+        Availability.ACTIVE,
+    )
+
+    assert result.success is False
+    assert len(calls) == 2
+
+
+def test_navigation_recovery_followed_by_toggle_uncertainty_uses_read_only_pass() -> None:
+    calls: list[object] = []
+    trace: list[str] = []
+
+    def executor(args: object, **kwargs: object) -> object:
+        calls.append(args)
+        if len(calls) == 1:
+            return SimpleNamespace(
+                status=AgentFinalStatus.FAILED,
+                stop_code=StopCode.VERIFICATION_FAILED,
+                telemetry=SimpleNamespace(hid_actions=1),
+                history=[_executed_step(_profile_click_proposal())],
+            )
+        if len(calls) == 2:
+            kwargs["observation_sink"](_analysis("Set yourself as active"))
+            return SimpleNamespace(
+                status=AgentFinalStatus.FAILED,
+                stop_code=StopCode.VERIFICATION_FAILED,
+                telemetry=SimpleNamespace(hid_actions=1),
+                history=[SimpleNamespace(proposal=_availability_click_proposal())],
+            )
+        kwargs["observation_sink"](_analysis("Set yourself as away"))
+        return SimpleNamespace(
+            status=AgentFinalStatus.SUCCESS,
+            stop_code=StopCode.COMPLETED,
+        )
+
+    result = AgentAvailabilityOperator(
+        executor=executor,
+        trace_output=trace.append,
+    ).execute("work-kvm", Availability.ACTIVE)
+
+    assert result.success is True
+    assert result.observed is Availability.ACTIVE
+    assert len(calls) == 3
+    assert "Set Slack manual availability" in calls[1].objective
+    assert "Do not change it" in calls[2].objective
+    assert trace == [
+        "work-kvm  | Starting one fresh observe-first recovery after uncertain Slack navigation.",
+        "work-kvm  | Starting one read-only final-state verification pass.",
+        "work-kvm  | Closed the profile menu with Escape.",
+    ]
+
+
+def test_unexecuted_profile_proposal_does_not_start_navigation_recovery() -> None:
+    calls: list[object] = []
+
+    def executor(args: object, **_kwargs: object) -> object:
+        calls.append(args)
+        return SimpleNamespace(
+            status=AgentFinalStatus.FAILED,
+            stop_code=StopCode.VERIFICATION_FAILED,
+            telemetry=SimpleNamespace(hid_actions=1),
+            history=[
+                SimpleNamespace(
+                    proposal=_profile_click_proposal(),
+                    execution_result=None,
+                )
+            ],
+        )
+
+    result = AgentAvailabilityOperator(executor=executor).execute(
+        "work-kvm",
+        Availability.ACTIVE,
+    )
+
+    assert result.success is False
+    assert len(calls) == 1
+
+
+def test_unrelated_verification_failure_does_not_start_navigation_recovery() -> None:
+    calls: list[object] = []
+    unrelated = ActionProposal(
         action=ClickElementAction(
             type="click_element",
-            element_id="slack_profile_avatar",
+            element_id="unrelated_control",
             button="left",
         ),
-        expected_outcome="The profile menu opens.",
+        expected_outcome="An unrelated control changes.",
         confidence=0.98,
         risk=RiskCategory.READ_ONLY,
-        reason_summary="Open profile menu.",
+        reason_summary="Use an unrelated control.",
     )
 
     def executor(args: object, **_kwargs: object) -> object:
@@ -306,7 +481,39 @@ def test_profile_navigation_failure_does_not_trigger_a_second_controller_session
             stop_code=StopCode.VERIFICATION_FAILED,
             summary="Previous action was not verified; it will not be repeated.",
             telemetry=SimpleNamespace(hid_actions=1),
-            history=[SimpleNamespace(proposal=profile_proposal)],
+            history=[_executed_step(unrelated)],
+        )
+
+    result = AgentAvailabilityOperator(executor=executor).execute(
+        "work-kvm",
+        Availability.ACTIVE,
+    )
+
+    assert result.success is False
+    assert len(calls) == 1
+
+
+def test_profile_status_control_does_not_qualify_as_profile_menu_navigation() -> None:
+    calls: list[object] = []
+    status_control = ActionProposal(
+        action=ClickElementAction(
+            type="click_element",
+            element_id="profile_status_button",
+            button="left",
+        ),
+        expected_outcome="The status editor opens.",
+        confidence=0.98,
+        risk=RiskCategory.READ_ONLY,
+        reason_summary="Open a status control.",
+    )
+
+    def executor(args: object, **_kwargs: object) -> object:
+        calls.append(args)
+        return SimpleNamespace(
+            status=AgentFinalStatus.FAILED,
+            stop_code=StopCode.VERIFICATION_FAILED,
+            telemetry=SimpleNamespace(hid_actions=1),
+            history=[_executed_step(status_control)],
         )
 
     result = AgentAvailabilityOperator(executor=executor).execute(
@@ -483,6 +690,7 @@ def test_jsonl_log_contains_only_sanitized_operation_metadata(tmp_path: Path) ->
         "outcome",
         "stop_code",
         "error",
+        "telemetry",
     }
     assert "screenshot" not in entry
     assert "objective" not in entry

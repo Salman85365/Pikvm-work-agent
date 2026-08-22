@@ -20,6 +20,7 @@ from work_agent.agent.models import (
     WaitAction,
 )
 from work_agent.vision.models import (
+    HARD_STOP_WARNINGS,
     SafetyWarning,
     ScreenAnalysis,
     ScreenState,
@@ -54,18 +55,27 @@ _DENY_TERMS = frozenset(
         "turn off protection",
     }
 )
-_SAFE_HOTKEYS = frozenset(
+# Navigation-only shortcuts, in both Windows/Linux (Control) and macOS (Meta) spellings: address
+# bar / find / quick switcher / window switching / launcher search. Nothing here sends, saves,
+# closes, or quits.
+SAFE_HOTKEYS = frozenset(
     {
         ("ControlLeft", "KeyL"),
         ("ControlLeft", "KeyF"),
+        ("ControlLeft", "KeyK"),
         ("ControlLeft", "Tab"),
         ("ControlLeft", "ShiftLeft", "Tab"),
         ("AltLeft", "Tab"),
+        ("MetaLeft", "KeyL"),
+        ("MetaLeft", "KeyF"),
+        ("MetaLeft", "KeyK"),
         ("MetaLeft", "Tab"),
+        ("MetaLeft", "ShiftLeft", "Tab"),
+        ("MetaLeft", "Backquote"),
         ("MetaLeft", "Space"),
     }
 )
-_SAFE_KEYS = frozenset(
+SAFE_KEYS = frozenset(
     {
         "Escape",
         "Tab",
@@ -73,7 +83,40 @@ _SAFE_KEYS = frozenset(
         "ArrowDown",
         "ArrowLeft",
         "ArrowRight",
+        "Home",
+        "End",
+        "PageUp",
+        "PageDown",
         "MetaLeft",
+    }
+)
+# Buttons that answer a system dialog, update prompt, or permission sheet. While such a dialog is
+# on screen the planner must walk around it (bring the wanted application in front), never
+# answer it: these are denied by name.
+_DIALOG_ANSWER_TERMS = frozenset(
+    {
+        "install",
+        "update",
+        "upgrade",
+        "restart",
+        "later",
+        "remind me",
+        "not now",
+        "try again",
+        "allow",
+        "don't allow",
+        "dont allow",
+        "ok",
+        "cancel",
+        "continue",
+        "agree",
+        "accept",
+        "decline",
+        "quit",
+        "close",
+        "dismiss",
+        "yes",
+        "no",
     }
 )
 _DENIED_KEYS = frozenset({"Power", "Sleep", "WakeUp"})
@@ -84,17 +127,7 @@ _DENIED_HOTKEYS = frozenset(
         ("MetaLeft", "KeyL"),
     }
 )
-_STOP_WARNINGS = frozenset(
-    {
-        SafetyWarning.AUTHENTICATION_PROMPT,
-        SafetyWarning.LOCK_SCREEN,
-        SafetyWarning.UNEXPECTED_DIALOG,
-        SafetyWarning.DESTRUCTIVE_CONFIRMATION,
-        SafetyWarning.REMOTE_DISCONNECT,
-        SafetyWarning.LOW_CONFIDENCE,
-        SafetyWarning.UNKNOWN_STATE,
-    }
-)
+_STOP_WARNINGS = HARD_STOP_WARNINGS
 
 
 class PolicyEngine:
@@ -127,6 +160,9 @@ class PolicyEngine:
                 "Destructive and system-changing actions are denied in the generic controller.",
                 proposal.risk,
             )
+        dialog_denial = self._dialog_rule(action, screen)
+        if dialog_denial is not None:
+            return dialog_denial
         if proposal.risk is RiskCategory.AUTHENTICATION:
             return self._deny(
                 "The generic controller cannot enter authentication information.",
@@ -160,7 +196,7 @@ class PolicyEngine:
                     "This hotkey can enter a system or lock-screen workflow.",
                     RiskCategory.SYSTEM_CHANGE,
                 )
-            if tuple(action.keys) not in _SAFE_HOTKEYS:
+            if tuple(action.keys) not in SAFE_HOTKEYS:
                 return self._approval(
                     "This hotkey is not on the local navigation allowlist.",
                     RiskCategory.UNKNOWN,
@@ -171,6 +207,32 @@ class PolicyEngine:
         if isinstance(action, (ClickElementAction, DoubleClickElementAction)):
             return self._element_action(action.element_id, screen)
         return self._deny("The action type is outside the policy vocabulary.", RiskCategory.UNKNOWN)
+
+    def _dialog_rule(self, action: object, screen: ScreenAnalysis) -> PolicyDecision | None:
+        """With an unexpected dialog on screen, forbid answering it; allow walking around it."""
+
+        if SafetyWarning.UNEXPECTED_DIALOG not in screen.warnings:
+            return None
+        if isinstance(action, PressKeyAction) and action.key in {"Enter", "Escape", "Space"}:
+            return self._deny(
+                "An unexpected dialog is on screen; Enter/Escape/Space could answer it. Bring "
+                "the wanted application in front instead.",
+                RiskCategory.SYSTEM_CHANGE,
+            )
+        if isinstance(action, (ClickElementAction, DoubleClickElementAction)):
+            element = self._element(screen, action.element_id)
+            if element is None:
+                return None
+            text = f"{element.label} {element.visible_text}".lower()
+            if element.role is UIElementRole.DIALOG or self._contains_terms(
+                text, _DIALOG_ANSWER_TERMS
+            ):
+                return self._deny(
+                    "That target answers the unexpected dialog; the dialog must be walked "
+                    "around, not answered.",
+                    RiskCategory.SYSTEM_CHANGE,
+                )
+        return None
 
     def _type_text(self, action: TypeTextAction, screen: ScreenAnalysis) -> PolicyDecision:
         context = f"{screen.application} {screen.summary}".lower()
@@ -237,7 +299,7 @@ class PolicyEngine:
                 "Enter may submit or confirm in an unclassified context.",
                 RiskCategory.UNKNOWN,
             )
-        if action.key in _SAFE_KEYS:
+        if action.key in SAFE_KEYS:
             return self._allow("The key is on the local navigation allowlist.")
         return self._approval(
             "This key is not on the local navigation allowlist.",
@@ -271,18 +333,25 @@ class PolicyEngine:
 
     @classmethod
     def _slack_availability_toggle(cls, element_id: str, screen: ScreenAnalysis) -> bool:
-        if screen.application.strip().lower() != "slack":
+        if "slack" not in screen.application.strip().lower():
             return False
         element = cls._element(screen, element_id)
-        if element is None or element.role not in {UIElementRole.MENU_ITEM, UIElementRole.BUTTON}:
+        if element is None or element.role not in {
+            UIElementRole.MENU_ITEM,
+            UIElementRole.BUTTON,
+            UIElementRole.UNKNOWN,
+        }:
             return False
-        allowed = {"set yourself as active", "set yourself as away"}
-        visible_values = {
-            value.strip().lower()
+        # The narrowest rule that names the permitted action: every visible value (however the
+        # vision model decorated it) must read as the same manual toggle and nothing else.
+        from work_agent.slack.state import manual_toggle_target
+
+        targets = {
+            manual_toggle_target(value)
             for value in (element.label, element.visible_text)
             if value.strip()
         }
-        return len(visible_values) == 1 and visible_values.issubset(allowed)
+        return len(targets) == 1 and None not in targets
 
     @staticmethod
     def _element(screen: ScreenAnalysis, element_id: str) -> UIElement | None:

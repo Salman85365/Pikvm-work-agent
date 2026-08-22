@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import nullcontext
+import tempfile
 from datetime import UTC, datetime
 from io import BytesIO
+from pathlib import Path
 from typing import ClassVar
 
 import pytest
@@ -11,6 +12,7 @@ from PIL import Image
 
 from work_agent.agent import cli as agent_cli
 from work_agent.agent.config import AgentSettings
+from work_agent.agent.lock import ControllerLock
 from work_agent.agent.models import (
     ActionProposal,
     AgentFinalStatus,
@@ -110,6 +112,7 @@ class _Planner:
         previous_verification: ActionVerification | None,
         history: list[AgentStepSummary],
         remaining_steps: int,
+        feedback: str | None = None,
     ) -> PlanningResult:
         return PlanningResult(
             proposal=type(self).proposals.pop(0),
@@ -224,7 +227,14 @@ def _configure(monkeypatch: pytest.MonkeyPatch, screenshots: list[Screenshot]) -
     monkeypatch.setattr(agent_cli.AgentSettings, "from_env", lambda: settings)
     monkeypatch.setattr(agent_cli.VisionSettings, "from_env", lambda: vision)
     monkeypatch.setattr(agent_cli.PiKVMSettings, "from_env", lambda _profile=None: pikvm)
-    monkeypatch.setattr(agent_cli.ControllerLock, "for_endpoint", lambda _: nullcontext())
+    lock_directory = Path(tempfile.mkdtemp(prefix="pikvm-agent-test-locks-"))
+    monkeypatch.setattr(
+        agent_cli.ControllerLock,
+        "for_endpoint",
+        classmethod(
+            lambda cls, endpoint, directory=None: ControllerLock(lock_directory / "endpoint.lock")
+        ),
+    )
     monkeypatch.setattr(agent_cli, "PiKVMSession", _Session)
     monkeypatch.setattr(agent_cli, "OpenAIScreenAnalyzer", _Analyzer)
     monkeypatch.setattr(agent_cli, "OpenAIActionPlanner", _Planner)

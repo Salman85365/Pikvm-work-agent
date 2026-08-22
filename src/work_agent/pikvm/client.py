@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import time
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -9,6 +10,7 @@ from typing import Any
 import httpx
 from PIL import Image, UnidentifiedImageError
 
+from work_agent.pikvm.auth import USER_AGENT, build_pikvm_credentials
 from work_agent.pikvm.config import PiKVMSettings
 from work_agent.pikvm.errors import (
     PiKVMAuthenticationError,
@@ -19,7 +21,7 @@ from work_agent.pikvm.errors import (
     PiKVMTimeoutError,
 )
 from work_agent.pikvm.models import MouseButton, Screenshot, ScreenSize
-from work_agent.pikvm.totp import TotpProvider, validate_totp_code
+from work_agent.pikvm.totp import TotpProvider
 
 _RETRYABLE_STATUS_CODES = frozenset({429, 502, 503, 504})
 _HID_MIN = -32768
@@ -30,7 +32,14 @@ _UNCERTAIN_HID_OUTCOME = (
 
 
 class PiKVMClient:
-    """Typed synchronous client for the documented PiKVM HTTP API."""
+    """Typed synchronous client for the documented PiKVM HTTP API.
+
+    Authentication is a single ``POST /api/auth/login`` whose ``auth_token`` cookie is then held
+    for the life of the client. The TOTP is therefore consumed once, at login, and never expires
+    underneath a long controller session the way per-request password headers do. PiKVM checks
+    the cookie before dispatching to any handler, so a 401/403 proves the request was not applied;
+    the client then logs in again and repeats that one request exactly once.
+    """
 
     def __init__(
         self,
@@ -40,28 +49,22 @@ class PiKVMClient:
         transport: httpx.BaseTransport | None = None,
         sleeper: Callable[[float], None] = time.sleep,
     ) -> None:
+        if settings.totp_required and totp_provider is None:
+            raise PiKVMConfigurationError(
+                "PiKVM 2FA is enabled but no TOTP provider was configured."
+            )
         self._settings = settings
+        self._totp_provider = totp_provider
         self._sleeper = sleeper
+        self._authenticated = False
+        self._login_count = 0
         timeout = httpx.Timeout(
             settings.request_timeout,
             connect=settings.connect_timeout,
         )
-        password = settings.password
-        if settings.totp_required:
-            if totp_provider is None:
-                raise PiKVMConfigurationError(
-                    "PiKVM 2FA is enabled but no TOTP provider was configured."
-                )
-            password += validate_totp_code(totp_provider.current_code())
-
         self._http = httpx.Client(
             base_url=f"{settings.base_url}/",
-            headers={
-                "X-KVMD-User": settings.username,
-                # PiKVM's documented TOTP flow appends the current code to the password.
-                "X-KVMD-Passwd": password,
-                "User-Agent": "pikvm-work-agent/0.1.1",
-            },
+            headers={"User-Agent": USER_AGENT},
             timeout=timeout,
             verify=settings.verify_ssl,
             transport=transport,
@@ -75,7 +78,44 @@ class PiKVMClient:
         self.close()
 
     def close(self) -> None:
+        if self._authenticated and not self._http.is_closed:
+            with contextlib.suppress(httpx.HTTPError):
+                self._http.post("api/auth/logout")
+            self._authenticated = False
         self._http.close()
+
+    @property
+    def login_count(self) -> int:
+        return self._login_count
+
+    def login(self) -> None:
+        """Authenticate once and keep PiKVM's session cookie; safe to call repeatedly."""
+
+        if self._authenticated:
+            return
+        user, password = build_pikvm_credentials(
+            self._settings,
+            totp_provider=self._totp_provider if self._settings.totp_required else None,
+        )
+        self._http.cookies.clear()
+        response = self._send(
+            "POST",
+            "api/auth/login",
+            params=None,
+            content=None,
+            data={"user": user, "passwd": password},
+            retryable=True,
+        )
+        if response.status_code in {401, 403}:
+            raise PiKVMAuthenticationError(
+                "PiKVM rejected the configured username/password or requires a current 2FA code."
+            )
+        if response.is_error:
+            raise PiKVMResponseError(
+                response.status_code, "POST", "/api/auth/login", outcome_uncertain=False
+            )
+        self._authenticated = True
+        self._login_count += 1
 
     def get_screenshot(self) -> Screenshot:
         """Capture a transient JPEG frame; PiKVM does not retain it server-side."""
@@ -262,11 +302,50 @@ class PiKVMClient:
         content: bytes | None = None,
         retryable: bool,
     ) -> httpx.Response:
+        self.login()
+        response = self._send(
+            method, path, params=params, content=content, data=None, retryable=retryable
+        )
+        if response.status_code in {401, 403}:
+            # PiKVM authenticates before dispatching, so this request was never applied.
+            # One fresh login and one repeat is therefore safe even for HID.
+            self._authenticated = False
+            self.login()
+            response = self._send(
+                method, path, params=params, content=content, data=None, retryable=retryable
+            )
+            if response.status_code in {401, 403}:
+                raise PiKVMAuthenticationError(
+                    "PiKVM rejected the session immediately after a fresh login. "
+                    "Check the username/password and, if they are correct, verify the Mac's "
+                    "system clock."
+                )
+        if response.is_error:
+            raise PiKVMResponseError(
+                response.status_code,
+                method,
+                f"/{path}",
+                outcome_uncertain=not retryable,
+            )
+        return response
+
+    def _send(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None,
+        content: bytes | None,
+        data: dict[str, str] | None,
+        retryable: bool,
+    ) -> httpx.Response:
         attempts = self._settings.max_retries + 1 if retryable else 1
 
         for attempt in range(attempts):
             try:
-                response = self._http.request(method, path, params=params, content=content)
+                response = self._http.request(
+                    method, path, params=params, content=content, data=data
+                )
             except httpx.TimeoutException as exc:
                 if attempt + 1 < attempts:
                     self._wait_before_retry(attempt)
@@ -284,21 +363,9 @@ class PiKVMClient:
                     message += _UNCERTAIN_HID_OUTCOME
                 raise PiKVMConnectionError(message) from exc
 
-            if response.status_code in {401, 403}:
-                raise PiKVMAuthenticationError(
-                    "PiKVM rejected the configured username/password or requires "
-                    "a current 2FA code."
-                )
             if response.status_code in _RETRYABLE_STATUS_CODES and attempt + 1 < attempts:
                 self._wait_before_retry(attempt)
                 continue
-            if response.is_error:
-                raise PiKVMResponseError(
-                    response.status_code,
-                    method,
-                    f"/{path}",
-                    outcome_uncertain=not retryable,
-                )
             return response
 
         raise AssertionError("PiKVM request retry loop exited unexpectedly.")

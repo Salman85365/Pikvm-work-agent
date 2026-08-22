@@ -83,8 +83,8 @@ class VisionSettings:
             raise VisionConfigurationError(
                 "OPENAI_REQUEST_TIMEOUT_SECONDS must be greater than zero."
             )
-        if not 0 <= self.max_retries <= 2:
-            raise VisionConfigurationError("OPENAI_MAX_RETRIES must be between 0 and 2.")
+        if not 0 <= self.max_retries <= 5:
+            raise VisionConfigurationError("OPENAI_MAX_RETRIES must be between 0 and 5.")
         if not 0.0 <= self.confidence_threshold <= 1.0:
             raise VisionConfigurationError(
                 "OPENAI_CONFIDENCE_THRESHOLD must be between 0.0 and 1.0."

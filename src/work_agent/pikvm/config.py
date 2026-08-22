@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import StrEnum
 from urllib.parse import urlsplit, urlunsplit
@@ -17,6 +18,52 @@ _PROFILE_NAME_PATTERN = re.compile(r"[a-z0-9][a-z0-9_-]*\Z")
 class TotpProviderKind(StrEnum):
     KEYCHAIN = "keychain"
     INTERACTIVE = "interactive"
+
+
+_WORK_IDENTITY_MAX_NAMES = 20
+_WORK_IDENTITY_MAX_NAME_LENGTH = 120
+
+
+@dataclass(frozen=True, slots=True)
+class WorkIdentity:
+    """Names which identify the user at one work environment."""
+
+    name: str
+    aliases: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        name = _identity_value("work identity name", self.name)
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for value in (name, *self.aliases):
+            alias = _identity_value("work identity alias", value)
+            key = alias.casefold()
+            if key not in seen:
+                normalized.append(alias)
+                seen.add(key)
+        if len(normalized) > _WORK_IDENTITY_MAX_NAMES:
+            raise PiKVMConfigurationError(
+                f"A work identity can contain at most {_WORK_IDENTITY_MAX_NAMES} names."
+            )
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "aliases", tuple(normalized))
+
+    def matches(self, value: str) -> bool:
+        candidate = value.strip().casefold()
+        return bool(candidate) and any(candidate == alias.casefold() for alias in self.aliases)
+
+
+def _identity_value(label: str, raw_value: str) -> str:
+    value = raw_value.strip()
+    if not value:
+        raise PiKVMConfigurationError(f"The {label} must not be empty.")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise PiKVMConfigurationError(f"The {label} must not contain control characters.")
+    if len(value) > _WORK_IDENTITY_MAX_NAME_LENGTH:
+        raise PiKVMConfigurationError(
+            f"The {label} must not exceed {_WORK_IDENTITY_MAX_NAME_LENGTH} characters."
+        )
+    return value
 
 
 def _parse_bool(name: str, raw_value: str) -> bool:
@@ -82,23 +129,40 @@ def _configured_profiles() -> tuple[str, ...]:
     return profiles
 
 
-def _selected_profile(explicit_profile: str | None, profiles: tuple[str, ...]) -> str | None:
+def _selected_profile(
+    explicit_profile: str | None,
+    profiles: tuple[str, ...],
+    *,
+    disabled: frozenset[str] = frozenset(),
+) -> str | None:
     raw_profile = explicit_profile
     if raw_profile is None:
         raw_profile = os.getenv("PIKVM_PROFILE")
     if raw_profile is None:
-        if len(profiles) == 1:
-            return profiles[0]
-        if len(profiles) > 1:
+        enabled = tuple(name for name in profiles if name not in disabled)
+        if len(enabled) == 1:
+            return enabled[0]
+        if len(enabled) > 1:
             raise PiKVMConfigurationError(
                 "Multiple PiKVM profiles are configured. Set PIKVM_PROFILE or pass --profile."
+            )
+        if profiles:
+            raise PiKVMConfigurationError(
+                "Every configured PiKVM profile is disabled. Enable one in the dashboard or with "
+                "`pikvm-agent profiles enable NAME`."
             )
         return None
 
     profile = _normalize_profile_name(raw_profile)
     if profiles and profile not in profiles:
         raise PiKVMConfigurationError(
-            f"Unknown PiKVM profile {profile!r}; add it to PIKVM_PROFILES or select a listed name."
+            f"Unknown PiKVM profile {profile!r}; add it to PIKVM_PROFILES, add it in the "
+            "dashboard, or select a listed name."
+        )
+    if profile in disabled:
+        raise PiKVMConfigurationError(
+            f"PiKVM profile {profile!r} is disabled. Enable it in the dashboard or with "
+            f"`pikvm-agent profiles enable {profile}` before using it."
         )
     return profile
 
@@ -107,11 +171,50 @@ def _profile_env_name(profile: str | None, setting: str) -> str:
     return f"{_profile_prefix(profile)}{setting}" if profile is not None else f"PIKVM_{setting}"
 
 
+def _work_identity(
+    profile: str | None,
+    env: Callable[[str, str | None], str | None],
+) -> WorkIdentity | None:
+    name_setting = _profile_env_name(profile, "WORK_IDENTITY_NAME")
+    aliases_setting = _profile_env_name(profile, "WORK_IDENTITY_ALIASES")
+    raw_name = env("WORK_IDENTITY_NAME", None)
+    raw_aliases = env("WORK_IDENTITY_ALIASES", None)
+    if raw_name is None and raw_aliases is None:
+        return None
+    if raw_name is None or not raw_name.strip():
+        raise PiKVMConfigurationError(
+            f"{name_setting} is required when {aliases_setting} is configured."
+        )
+
+    aliases: tuple[str, ...] = ()
+    if raw_aliases is not None:
+        parts = raw_aliases.split(",")
+        if any(not part.strip() for part in parts):
+            raise PiKVMConfigurationError(
+                f"{aliases_setting} must be a comma-separated list without empty aliases."
+            )
+        aliases = tuple(parts)
+    return WorkIdentity(name=raw_name, aliases=aliases)
+
+
 def configured_pikvm_profiles() -> tuple[str, ...]:
-    """Return declared named profiles without loading any profile credentials."""
+    """Return every enabled named profile (.env and managed) without loading credentials."""
+
+    from work_agent.pikvm.profiles import enabled_profile_names
 
     load_dotenv()
-    return _configured_profiles()
+    return enabled_profile_names()
+
+
+def _known_profiles() -> tuple[tuple[str, ...], frozenset[str]]:
+    """All profile names from both sources, plus the shared disabled set."""
+
+    from work_agent.pikvm.profiles import ManagedProfileStore
+
+    store = ManagedProfileStore()
+    env_names = _configured_profiles()
+    managed = tuple(name for name in sorted(store.managed_profiles()) if name not in env_names)
+    return env_names + managed, store.disabled_names()
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +225,7 @@ class PiKVMSettings:
     username: str
     password: str = field(repr=False)
     profile: str | None = None
+    work_identity: WorkIdentity | None = field(default=None, repr=False)
     totp_required: bool = True
     totp_provider: TotpProviderKind = TotpProviderKind.KEYCHAIN
     totp_keychain_service: str = DEFAULT_TOTP_KEYCHAIN_SERVICE
@@ -181,8 +285,10 @@ class PiKVMSettings:
 
         load_dotenv()
 
-        profiles = _configured_profiles()
-        selected_profile = _selected_profile(profile, profiles)
+        profiles, disabled = _known_profiles()
+        selected_profile = _selected_profile(profile, profiles, disabled=disabled)
+        if selected_profile is not None and selected_profile not in _configured_profiles():
+            return cls._from_managed(selected_profile)
 
         def env(setting: str, default: str | None = None) -> str | None:
             return os.getenv(_profile_env_name(selected_profile, setting), default)
@@ -213,6 +319,7 @@ class PiKVMSettings:
             username=required[_profile_env_name(selected_profile, "USERNAME")] or "",
             password=required[_profile_env_name(selected_profile, "PASSWORD")] or "",
             profile=selected_profile,
+            work_identity=_work_identity(selected_profile, env),
             totp_required=_parse_bool(
                 _profile_env_name(selected_profile, "TOTP_REQUIRED"),
                 env("TOTP_REQUIRED", "true") or "",
@@ -234,4 +341,28 @@ class PiKVMSettings:
                 _profile_env_name(selected_profile, "MOUSE_MOVE_SETTLE_SECONDS"), 0.1
             ),
             keymap=env("KEYMAP", "en-us"),
+        )
+
+    @classmethod
+    def _from_managed(cls, profile: str) -> PiKVMSettings:
+        from work_agent.pikvm.profiles import ManagedProfileStore
+
+        store = ManagedProfileStore()
+        record = store.managed_profiles().get(profile)
+        if record is None:
+            raise PiKVMConfigurationError(f"Unknown managed PiKVM profile {profile!r}.")
+        return cls(
+            base_url=record.url,
+            username=record.username,
+            password=store.password(profile),
+            profile=profile,
+            totp_required=record.totp_required,
+            totp_provider=TotpProviderKind.KEYCHAIN,
+            verify_ssl=record.verify_ssl,
+            connect_timeout=_env_float("PIKVM_CONNECT_TIMEOUT", 5.0),
+            request_timeout=_env_float("PIKVM_REQUEST_TIMEOUT", 15.0),
+            max_retries=_env_int("PIKVM_MAX_RETRIES", 2),
+            retry_backoff=_env_float("PIKVM_RETRY_BACKOFF", 0.25),
+            mouse_move_settle_seconds=_env_float("PIKVM_MOUSE_MOVE_SETTLE_SECONDS", 0.1),
+            keymap=record.keymap,
         )

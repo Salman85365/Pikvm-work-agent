@@ -33,6 +33,8 @@ from work_agent.vision.errors import (
 )
 from work_agent.vision.images import decode_image
 from work_agent.vision.models import (
+    HARD_STOP_WARNINGS,
+    ActionVerification,
     AnalysisOptions,
     AnalysisUsage,
     ImageDetail,
@@ -46,6 +48,7 @@ from work_agent.vision.models import (
     ScreenPerception,
     ScreenState,
     ServiceTier,
+    VerificationStatus,
 )
 from work_agent.vision.prompts import SCREEN_ANALYSIS_PROMPT, SCREEN_OBSERVATION_PROMPT
 
@@ -249,12 +252,15 @@ class OpenAIScreenAnalyzer:
 
         verification = final.perception.previous_action_verification
         if context.previous_action is None and verification is not None:
-            raise VisionStructuredOutputError(
-                "OpenAI returned previous-action verification for the first observation."
-            )
+            # A spurious "not applicable" verdict on the first frame is a formatting slip, not
+            # a reason to end the session.
+            verification = None
         if context.previous_action is not None and verification is None:
-            raise VisionStructuredOutputError(
-                "OpenAI omitted required previous-action verification."
+            verification = ActionVerification(
+                status=VerificationStatus.UNCERTAIN,
+                confidence=0.0,
+                evidence="The observation returned no verification for the previous action.",
+                expected_outcome_observed=False,
             )
 
         perception = self._apply_local_safety(final.perception.analysis)
@@ -320,9 +326,15 @@ class OpenAIScreenAnalyzer:
             except VisionStructuredOutputError:
                 raise
             except (ValidationError, openai.APIResponseValidationError) as exc:
-                raise VisionStructuredOutputError(
-                    "OpenAI returned an invalid structured screen analysis."
-                ) from exc
+                # A malformed structured response is a transient read failure, not a verdict
+                # about the screen: the same frame usually parses on the next attempt. Reading
+                # sends no HID, so retrying it cannot repeat an action.
+                if retries >= self._settings.max_retries:
+                    raise VisionStructuredOutputError(
+                        "OpenAI returned an invalid structured screen analysis."
+                    ) from exc
+                self._backoff(retries)
+                retries += 1
             except openai.AuthenticationError as exc:
                 raise VisionAuthenticationError(
                     "OpenAI authentication failed. Check the local API key."
@@ -411,9 +423,15 @@ class OpenAIScreenAnalyzer:
             except VisionStructuredOutputError:
                 raise
             except (ValidationError, openai.APIResponseValidationError) as exc:
-                raise VisionStructuredOutputError(
-                    "OpenAI returned an invalid structured screen observation."
-                ) from exc
+                # See _run_model: a dense screen makes a slipped bounding box or an
+                # inconsistent target flag more likely, and one bad parse should not end a
+                # session that was mid-way through reaching its objective.
+                if retries >= self._settings.max_retries:
+                    raise VisionStructuredOutputError(
+                        "OpenAI returned an invalid structured screen observation."
+                    ) from exc
+                self._backoff(retries)
+                retries += 1
             except openai.AuthenticationError as exc:
                 raise VisionAuthenticationError(
                     "OpenAI authentication failed. Check the local API key."
@@ -527,9 +545,15 @@ class OpenAIScreenAnalyzer:
             except VisionStructuredOutputError:
                 raise
             except (ValidationError, openai.APIResponseValidationError) as exc:
-                raise VisionStructuredOutputError(
-                    "OpenAI returned an invalid structured perception."
-                ) from exc
+                # Same reasoning as _run_model, and it matters more here: skill schemas carry
+                # their own consistency validators, so one contradictory field would otherwise
+                # discard an entire read.
+                if retries >= self._settings.max_retries:
+                    raise VisionStructuredOutputError(
+                        "OpenAI returned an invalid structured perception."
+                    ) from exc
+                self._backoff(retries)
+                retries += 1
             except (
                 openai.RateLimitError,
                 openai.APITimeoutError,
@@ -557,6 +581,18 @@ class OpenAIScreenAnalyzer:
                 raise VisionRequestError("The OpenAI perception request failed.") from exc
 
     def _apply_local_safety(self, perception: ScreenPerception) -> ScreenPerception:
+        """Decide safety locally from warning categories, not from the model's own flag.
+
+        Hard stops are hazards nothing downstream may act through: authentication and lock
+        screens, destructive confirmations, a disconnected feed, an unknown state, or a read
+        below the confidence threshold. An unexpected dialog or notification is reported as a
+        warning but is *not* a stop: it is an obstacle the planner routes around (by bringing the
+        wanted application in front) under policy rules that forbid touching the dialog itself.
+        A model that sets safe_to_continue=false without naming a hazard is stating a caution -
+        commonly "nothing left to do" - so its reason is kept for the planner as an advisory
+        instead of ending the session before the planner can say finish.
+        """
+
         warnings = list(perception.warnings)
         state_warning = {
             ScreenState.AUTHENTICATION: SafetyWarning.AUTHENTICATION_PROMPT,
@@ -572,26 +608,23 @@ class OpenAIScreenAnalyzer:
         ):
             warnings.append(SafetyWarning.LOW_CONFIDENCE)
 
-        stop_warnings = {
-            SafetyWarning.AUTHENTICATION_PROMPT,
-            SafetyWarning.LOCK_SCREEN,
-            SafetyWarning.UNEXPECTED_DIALOG,
-            SafetyWarning.DESTRUCTIVE_CONFIRMATION,
-            SafetyWarning.REMOTE_DISCONNECT,
-            SafetyWarning.LOW_CONFIDENCE,
-            SafetyWarning.UNKNOWN_STATE,
-        }
-        must_stop = any(warning in stop_warnings for warning in warnings)
-        safe_to_continue = perception.safe_to_continue and not must_stop
+        must_stop = any(warning in HARD_STOP_WARNINGS for warning in warnings)
+        summary = perception.summary
         stop_reason = perception.stop_reason
-        if not safe_to_continue and not stop_reason:
-            stop_reason = "Local safety policy requires review before continuing."
-        if safe_to_continue:
+        if must_stop:
+            if not stop_reason:
+                stop_reason = "Local safety policy requires review: " + ", ".join(
+                    warning.value for warning in warnings if warning in HARD_STOP_WARNINGS
+                )
+        else:
+            if not perception.safe_to_continue and stop_reason:
+                summary = f"{summary.rstrip('.')}. Analyzer caution: {stop_reason}"
             stop_reason = None
         return perception.model_copy(
             update={
+                "summary": summary,
                 "warnings": warnings,
-                "safe_to_continue": safe_to_continue,
+                "safe_to_continue": not must_stop,
                 "stop_reason": stop_reason,
             }
         )

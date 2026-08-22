@@ -109,3 +109,52 @@ def test_other_slack_edits_remain_approval_gated(label: str) -> None:
     )
 
     assert decision.decision is PolicyDecisionKind.REQUIRE_APPROVAL
+
+
+@pytest.mark.parametrize(
+    ("label", "role"),
+    [
+        ("Slack (2 unread)", UIElementRole.ICON),
+        ("Slack app icon in the Dock", UIElementRole.UNKNOWN),
+        ("Slack - 3 new messages", UIElementRole.BUTTON),
+    ],
+)
+def test_decorated_dock_labels_still_count_as_bringing_slack_forward(
+    label: str, role: UIElementRole
+) -> None:
+    """A Dock icon routinely carries a badge; the label must not have to be exactly 'Slack'."""
+    screen = _screen(_element(label, role), application="Finder")
+
+    decision = SlackAvailabilityPolicyEngine().evaluate(_proposal(RiskCategory.UNKNOWN), screen)
+
+    assert decision.decision is PolicyDecisionKind.ALLOW
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "Set yourself as away",
+        "Set yourself as away (menu item)",
+        "'Set yourself as active'",
+        "Set yourself as active…",
+    ],
+)
+def test_decorated_manual_toggle_labels_are_the_permitted_local_edit(label: str) -> None:
+    screen = _screen(_element(label, UIElementRole.MENU_ITEM), application="Slack")
+
+    decision = SlackAvailabilityPolicyEngine().evaluate(_proposal(RiskCategory.LOCAL_EDIT), screen)
+
+    assert decision.decision is PolicyDecisionKind.ALLOW
+    assert decision.inferred_risk is RiskCategory.LOCAL_EDIT
+
+
+@pytest.mark.parametrize(
+    "label",
+    ["Set yourself as away and send a message", "Set status: away", "Pause notifications"],
+)
+def test_toggle_lookalikes_stay_gated(label: str) -> None:
+    screen = _screen(_element(label, UIElementRole.MENU_ITEM), application="Slack")
+
+    decision = SlackAvailabilityPolicyEngine().evaluate(_proposal(RiskCategory.LOCAL_EDIT), screen)
+
+    assert decision.decision is not PolicyDecisionKind.ALLOW

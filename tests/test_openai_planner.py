@@ -162,9 +162,9 @@ def test_planner_request_is_stateless_private_and_strict() -> None:
     assert result.model == "gpt-5.6-terra-2026-07-01"
 
 
-def test_planner_rejects_invented_element_id() -> None:
-    fake = _OpenAI([_response(_proposal("invented"))])
-    planner = OpenAIActionPlanner(_settings(), client=cast(OpenAI, fake))
+def test_planner_corrects_an_invented_element_id_once_then_gives_up() -> None:
+    fake = _OpenAI([_response(_proposal("invented")), _response(_proposal("still_invented"))])
+    planner = OpenAIActionPlanner(_settings(planner_max_retries=1), client=cast(OpenAI, fake))
 
     with pytest.raises(PlannerStructuredOutputError, match="not in the current analysis"):
         planner.plan(
@@ -175,6 +175,30 @@ def test_planner_rejects_invented_element_id() -> None:
             history=[],
             remaining_steps=5,
         )
+
+    assert len(fake.responses.calls) == 2
+    second_input = fake.responses.calls[1]["input"][0]["content"]
+    assert '"correction": "The planner referenced element \'invented\'' in second_input
+
+
+def test_planner_accepts_the_corrected_proposal() -> None:
+    fake = _OpenAI([_response(_proposal("invented")), _response(_proposal())])
+    planner = OpenAIActionPlanner(_settings(), client=cast(OpenAI, fake))
+
+    result = planner.plan(
+        objective="Open profile",
+        screen=_screen(),
+        previous_action=None,
+        previous_verification=None,
+        history=[],
+        remaining_steps=5,
+        feedback="The previous action could not be verified.",
+    )
+
+    assert isinstance(result.proposal.action, ClickElementAction)
+    assert result.retries == 1
+    first_input = fake.responses.calls[0]["input"][0]["content"]
+    assert '"controller_feedback": "The previous action could not be verified."' in first_input
 
 
 def test_planner_accepts_finish_action_as_one_proposal() -> None:

@@ -15,6 +15,7 @@ artifacts/
 debug-screenshots/
 .local-debug/
 .local-secrets/
+.local-data/
 private-screenshots/
 evals/private/
 *.totp-qr.png

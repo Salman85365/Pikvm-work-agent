@@ -53,10 +53,10 @@ def test_missing_api_key_is_sanitized(monkeypatch: pytest.MonkeyPatch) -> None:
     ("name", "value"),
     [
         ("OPENAI_SERVICE_TIER", "priority"),
-        ("OPENAI_REASONING_EFFORT", "high"),
+        ("OPENAI_REASONING_EFFORT", "maximum"),
         ("OPENAI_IMAGE_DETAIL", "original"),
         ("OPENAI_STORE", "true"),
-        ("OPENAI_MAX_RETRIES", "3"),
+        ("OPENAI_MAX_RETRIES", "6"),
         ("OPENAI_CONFIDENCE_THRESHOLD", "1.1"),
     ],
 )

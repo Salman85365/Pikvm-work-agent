@@ -15,6 +15,7 @@ from work_agent.agent.models import (
     ClickElementAction,
     DoubleClickElementAction,
     MoveMouseAction,
+    ScrollAction,
 )
 from work_agent.pikvm import Screenshot
 from work_agent.vision import ScreenAnalysis
@@ -130,13 +131,19 @@ class PreActionGuard:
                 reason="Screen dimensions changed after planning.",
                 difference=1.0,
             )
-        if isinstance(action, (MoveMouseAction, ClickElementAction, DoubleClickElementAction)):
+        target_id: str | None = None
+        if isinstance(
+            action,
+            (MoveMouseAction, ClickElementAction, DoubleClickElementAction, ScrollAction),
+        ):
+            target_id = action.element_id
+        if target_id is not None:
             element = next(
                 (
                     element
                     for element in ([screen.target] if screen.target is not None else [])
                     + screen.relevant_elements
-                    if element.id == action.element_id
+                    if element.id == target_id
                 ),
                 None,
             )

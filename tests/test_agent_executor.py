@@ -162,3 +162,44 @@ def test_type_text_does_not_append_enter_or_echo_text_in_result() -> None:
     assert result.transport_status is ExecutionTransportStatus.SENT
     assert client.calls == [("type_text", (sensitive,), {"keymap": None, "delay": 0.0})]
     assert result.sanitized_error is None
+
+
+def test_targeted_scroll_hovers_the_element_before_the_wheel() -> None:
+    """The wheel scrolls whatever is under the pointer; aiming at nothing changes nothing."""
+    client = _Client()
+    delays: list[float] = []
+    executor = ActionExecutor(client, sleeper=delays.append)
+    proposal = _proposal(
+        {"type": "scroll", "direction": "down", "amount": 2, "element_id": "profile"}
+    )
+
+    result = executor.execute(proposal, _screen(click_point=NormalizedPoint(x=500, y=500)))
+
+    assert result.transport_status is ExecutionTransportStatus.SENT
+    assert [call[0] for call in client.calls] == ["move_mouse", "scroll"]
+    assert client.calls[0][1] == (960, 540)
+    assert client.calls[1][1] == (-240,)
+    assert delays == [0.1]
+
+
+def test_untargeted_scroll_still_sends_only_the_wheel() -> None:
+    client = _Client()
+    executor = ActionExecutor(client)
+    proposal = _proposal({"type": "scroll", "direction": "up", "amount": 1})
+
+    executor.execute(proposal, _screen())
+
+    assert [call[0] for call in client.calls] == ["scroll"]
+
+
+def test_targeted_scroll_with_stale_element_fails_without_hid() -> None:
+    client = _Client()
+    executor = ActionExecutor(client)
+    proposal = _proposal(
+        {"type": "scroll", "direction": "down", "amount": 2, "element_id": "profile"}
+    )
+
+    result = executor.execute(proposal, _screen(click_point=None))
+
+    assert result.transport_status is ExecutionTransportStatus.FAILED
+    assert client.calls == []

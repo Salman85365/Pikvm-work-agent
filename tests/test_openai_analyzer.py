@@ -10,6 +10,7 @@ import openai
 import pytest
 from openai import OpenAI
 from PIL import Image
+from pydantic import ValidationError
 
 from work_agent.vision import (
     ActionVerification,
@@ -190,6 +191,155 @@ def test_transient_timeout_retries_are_bounded() -> None:
     assert sleeps == [0.5, 1.0]
 
 
+def _validation_error() -> ValidationError:
+    """A malformed response the local normalisers cannot repair (a wrong enum value)."""
+
+    try:
+        ScreenPerception.model_validate(
+            {
+                "application": "Microsoft Teams",
+                "screen_state": "hologram",
+                "summary": "Teams calendar is visible.",
+                "target_found": False,
+                "target": None,
+                "relevant_elements": [],
+                "warnings": [],
+                "safe_to_continue": True,
+                "stop_reason": None,
+                "confidence": 0.9,
+            }
+        )
+    except ValidationError as exc:
+        return exc
+    raise AssertionError("expected a validation error")
+
+
+def _observation(perception: ScreenPerception) -> ScreenObservationPerception:
+    return ScreenObservationPerception(
+        analysis=perception,
+        previous_action_verification=None,
+    )
+
+
+def test_a_malformed_analysis_is_retried_rather_than_ending_the_session() -> None:
+    fake = _FakeOpenAI([_validation_error(), _response(_perception())])
+    sleeps: list[float] = []
+    analyzer = OpenAIScreenAnalyzer(
+        _settings(max_retries=2),
+        client=cast(OpenAI, fake),
+        sleeper=sleeps.append,
+    )
+
+    result = analyzer.analyze(
+        _image_bytes(),
+        objective="Identify the application",
+        width=64,
+        height=32,
+    )
+
+    assert len(fake.responses.calls) == 2
+    assert sleeps == [0.5]
+    assert result.retries == 1
+    assert result.application == "Slack"
+
+
+def test_malformed_analysis_retries_are_bounded() -> None:
+    fake = _FakeOpenAI([_validation_error() for _ in range(3)])
+    sleeps: list[float] = []
+    analyzer = OpenAIScreenAnalyzer(
+        _settings(max_retries=2),
+        client=cast(OpenAI, fake),
+        sleeper=sleeps.append,
+    )
+
+    with pytest.raises(VisionStructuredOutputError, match="invalid structured screen analysis"):
+        analyzer.analyze(
+            _image_bytes(),
+            objective="Identify the application",
+            width=64,
+            height=32,
+        )
+
+    assert len(fake.responses.calls) == 3
+    assert sleeps == [0.5, 1.0]
+
+
+def test_a_malformed_observation_is_retried_rather_than_ending_the_session() -> None:
+    """The controller observes after every action; one bad parse must not fail the run."""
+
+    good = SimpleNamespace(
+        output_parsed=_observation(_perception()),
+        model="gpt-5.6-luna",
+        service_tier="default",
+        usage=_usage(),
+    )
+    fake = _FakeOpenAI([_validation_error(), good])
+    sleeps: list[float] = []
+    analyzer = OpenAIScreenAnalyzer(
+        _settings(max_retries=2),
+        client=cast(OpenAI, fake),
+        sleeper=sleeps.append,
+    )
+
+    result = analyzer.observe(
+        _image_bytes(),
+        context=ObservationContext(objective="Bring the calendar into view"),
+        width=64,
+        height=32,
+    )
+
+    assert len(fake.responses.calls) == 2
+    assert sleeps == [0.5]
+    assert result.analysis.retries == 1
+
+
+def test_malformed_observation_retries_are_bounded() -> None:
+    fake = _FakeOpenAI([_validation_error() for _ in range(3)])
+    sleeps: list[float] = []
+    analyzer = OpenAIScreenAnalyzer(
+        _settings(max_retries=2),
+        client=cast(OpenAI, fake),
+        sleeper=sleeps.append,
+    )
+
+    with pytest.raises(VisionStructuredOutputError, match="invalid structured screen observation"):
+        analyzer.observe(
+            _image_bytes(),
+            context=ObservationContext(objective="Bring the calendar into view"),
+            width=64,
+            height=32,
+        )
+
+    assert len(fake.responses.calls) == 3
+    assert sleeps == [0.5, 1.0]
+
+
+def test_a_malformed_skill_perception_is_retried() -> None:
+    """Skill schemas carry their own validators, so they fail this way more often."""
+
+    fake = _FakeOpenAI([_validation_error(), _response(_perception())])
+    sleeps: list[float] = []
+    analyzer = OpenAIScreenAnalyzer(
+        _settings(max_retries=2),
+        client=cast(OpenAI, fake),
+        sleeper=sleeps.append,
+    )
+
+    perception, telemetry = analyzer.perceive(
+        _image_bytes(),
+        schema=ScreenPerception,
+        instructions="Read the calendar.",
+        context="Report today's meetings.",
+        width=64,
+        height=32,
+    )
+
+    assert len(fake.responses.calls) == 2
+    assert sleeps == [0.5]
+    assert telemetry.retries == 1
+    assert perception.application == "Slack"
+
+
 def test_authentication_failure_is_not_retried_or_leaked() -> None:
     request = httpx.Request("POST", "https://api.openai.com/v1/responses")
     response = httpx.Response(401, request=request)
@@ -353,7 +503,7 @@ def test_observe_combines_current_analysis_and_previous_action_verification() ->
     assert result.previous_action_verification.status is VerificationStatus.SUCCESS
 
 
-def test_first_observation_rejects_fabricated_previous_action_verification() -> None:
+def test_first_observation_drops_a_fabricated_previous_action_verification() -> None:
     perception = ScreenObservationPerception(
         analysis=_perception(),
         previous_action_verification=ActionVerification(
@@ -375,16 +525,17 @@ def test_first_observation_rejects_fabricated_previous_action_verification() -> 
     )
     analyzer = OpenAIScreenAnalyzer(_settings(), client=cast(OpenAI, fake))
 
-    with pytest.raises(VisionStructuredOutputError, match="first observation"):
-        analyzer.observe(
-            _image_bytes(),
-            context=ObservationContext(objective="Identify the screen"),
-            width=64,
-            height=32,
-        )
+    result = analyzer.observe(
+        _image_bytes(),
+        context=ObservationContext(objective="Identify the screen"),
+        width=64,
+        height=32,
+    )
+
+    assert result.previous_action_verification is None
 
 
-def test_post_action_observation_requires_verification() -> None:
+def test_post_action_observation_without_verification_is_uncertain_not_fatal() -> None:
     perception = ScreenObservationPerception(
         analysis=_perception(),
         previous_action_verification=None,
@@ -401,14 +552,18 @@ def test_post_action_observation_requires_verification() -> None:
     )
     analyzer = OpenAIScreenAnalyzer(_settings(), client=cast(OpenAI, fake))
 
-    with pytest.raises(VisionStructuredOutputError, match="omitted"):
-        analyzer.observe(
-            _image_bytes(),
-            context=ObservationContext(
-                objective="Open menu",
-                previous_action="press_key Escape",
-                expected_outcome="Menu closes.",
-            ),
-            width=64,
-            height=32,
-        )
+    result = analyzer.observe(
+        _image_bytes(),
+        context=ObservationContext(
+            objective="Open menu",
+            previous_action="press_key Escape",
+            expected_outcome="Menu closes.",
+        ),
+        width=64,
+        height=32,
+    )
+
+    verification = result.previous_action_verification
+    assert verification is not None
+    assert verification.status is VerificationStatus.UNCERTAIN
+    assert verification.expected_outcome_observed is False

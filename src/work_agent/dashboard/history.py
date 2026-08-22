@@ -12,7 +12,9 @@ from work_agent.dashboard.models import (
     HistorySummary,
     KvmOutcome,
     RunRecord,
+    RunTelemetry,
 )
+from work_agent.schedule.runlog import LOCK_BUSY_STOP_CODE
 
 _MAX_REASONS = 8
 
@@ -35,7 +37,12 @@ _STOP_CODE_LABELS: dict[str, str] = {
     "runtime_limit": "Hit the runtime limit",
     "step_limit": "Hit the step limit",
     "interrupted": "Interrupted",
+    "pikvm_unreachable": "PiKVM unreachable",
+    "pikvm_auth_failed": "PiKVM rejected credentials",
+    "model_provider_error": "OpenAI API unavailable",
+    "model_output_invalid": "OpenAI output failed local schema",
     "internal_error": "Local error stopped the controller",
+    "lock_busy": "Another workflow held the PiKVM",
 }
 
 # Fallback for records written before stop_code existed. Ordered most-specific first; the first
@@ -144,7 +151,51 @@ def _parse_record(payload: object) -> RunRecord | None:
         outcome=outcome,
         stop_code=stop_code if isinstance(stop_code, str) else None,
         error=error if isinstance(error, str) else None,
+        telemetry=_parse_telemetry(payload.get("telemetry")),
     )
+
+
+def _parse_telemetry(payload: object) -> RunTelemetry | None:
+    if not isinstance(payload, dict):
+        return None
+    counts: dict[str, int] = {}
+    keys = ("sessions", "steps", "hid_actions", "vision_calls", "planner_calls", "total_tokens")
+    for key in keys:
+        value = payload.get(key, 0)
+        if isinstance(value, bool) or not isinstance(value, int | float):
+            return None
+        counts[key] = max(0, int(value))
+    runtime = payload.get("runtime_seconds", 0.0)
+    if isinstance(runtime, bool) or not isinstance(runtime, int | float):
+        return None
+    return RunTelemetry(
+        sessions=counts["sessions"],
+        steps=counts["steps"],
+        hid_actions=counts["hid_actions"],
+        vision_calls=counts["vision_calls"],
+        planner_calls=counts["planner_calls"],
+        total_tokens=counts["total_tokens"],
+        runtime_seconds=max(0.0, float(runtime)),
+    )
+
+
+def _skipped(record: RunRecord) -> bool:
+    """A run that never touched the KVM because another workflow held it is not a failure."""
+
+    return record.outcome == "failure" and record.stop_code == LOCK_BUSY_STOP_CODE
+
+
+def _trailing_failures(owned: list[RunRecord]) -> int:
+    """Count consecutive failures ending at the newest record, ignoring skipped runs."""
+
+    count = 0
+    for record in sorted(owned, key=lambda record: record.timestamp, reverse=True):
+        if _skipped(record):
+            continue
+        if record.outcome != "failure":
+            break
+        count += 1
+    return count
 
 
 def _read_lines(path: Path) -> tuple[list[RunRecord], int]:
@@ -170,24 +221,30 @@ def _read_lines(path: Path) -> tuple[list[RunRecord], int]:
 
 def _summarize(records: list[RunRecord]) -> HistorySummary:
     success = sum(1 for record in records if record.outcome == "success")
-    failure = len(records) - success
+    skipped = sum(1 for record in records if _skipped(record))
+    failure = len(records) - success - skipped
     changes = sum(1 for record in records if record.outcome == "success" and record.changed is True)
 
     per_kvm: list[KvmOutcome] = []
     for kvm in sorted({record.kvm for record in records}):
         owned = [record for record in records if record.kvm == kvm]
         kvm_success = sum(1 for record in owned if record.outcome == "success")
+        kvm_skipped = sum(1 for record in owned if _skipped(record))
+        counted = len(owned) - kvm_skipped
         latest = max(owned, key=lambda record: record.timestamp)
         per_kvm.append(
             KvmOutcome(
                 kvm=kvm,
                 total=len(owned),
                 success=kvm_success,
-                failure=len(owned) - kvm_success,
-                success_rate=kvm_success / len(owned) if owned else 0.0,
+                failure=counted - kvm_success,
+                skipped=kvm_skipped,
+                success_rate=kvm_success / counted if counted else 0.0,
                 last_outcome=latest.outcome,
                 last_observed=latest.observed,
                 last_at=latest.timestamp,
+                last_stop_code=latest.stop_code,
+                consecutive_failures=_trailing_failures(owned),
             )
         )
 
@@ -213,11 +270,13 @@ def _summarize(records: list[RunRecord]) -> HistorySummary:
     ]
 
     timestamps = [record.timestamp for record in records]
+    counted = len(records) - skipped
     return HistorySummary(
         total=len(records),
         success=success,
         failure=failure,
-        success_rate=success / len(records) if records else 0.0,
+        skipped=skipped,
+        success_rate=success / counted if counted else 0.0,
         changes_applied=changes,
         no_ops=sum(
             1
